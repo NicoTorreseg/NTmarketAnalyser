@@ -30,8 +30,8 @@ A diferencia de los bots tradicionales que solo miran el precio, este sistema:
 
 1. **Clonar el repositorio**
    ```bash
-   git clone [https://github.com/NicoTorreseg/AnalisisCryptosCoinmarketcap.git](https://github.com/NicoTorreseg/AnalisisCryptosCoinmarketcap.git)
-   cd AnalisisCryptosCoinmarketcap
+   git clone https://github.com/NicoTorreseg/NTmarketAnalyser.git
+   cd NTmarketAnalyser
 Instalar dependencias
 
 Bash
