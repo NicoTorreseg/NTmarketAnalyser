@@ -365,8 +365,14 @@ def view_portfolio(db: Session = Depends(get_db)):
 @app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
 def dashboard(request: Request, db: Session = Depends(get_db)):
     """
-    Dashboard inteligente que unifica Criptos y Stocks corrigiendo nombres de columnas.
+     Este endpoint sirve la interfaz gráfica. 
+    
+    # 🚀 [HAZ CLIC AQUÍ PARA ABRIR EL DASHBOARD](/dashboard)
+    
+    *(El botón 'Try it out' de abajo solo te mostrará el código HTML crudo)*
     """
+  
+
     # 1. Recuperar últimos registros de ambas tablas
     recent_cryptos = db.query(CryptoSignal).order_by(CryptoSignal.detected_at.desc()).limit(20).all()
     recent_stocks = db.query(StockSignal).order_by(StockSignal.detected_at.desc()).limit(20).all()
