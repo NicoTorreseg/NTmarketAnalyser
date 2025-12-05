@@ -8,7 +8,7 @@ class CoinSignalSchema(BaseModel):
     price: float
     percent_change_24h: float
     rsi: Optional[float] = None
-    
+    technical_signal: Optional[str] = None
     # --- IA INFO ---
     ai_score: Optional[int] = None
     ai_decision: Optional[str] = None
@@ -24,7 +24,7 @@ class StockSignalSchema(BaseModel):
     price: float
     percent_change: float
     rsi: Optional[float] = None
-    
+    technical_signal: Optional[str] = None
     # --- IA INFO ---
     ai_score: Optional[int] = None
     ai_decision: Optional[str] = None

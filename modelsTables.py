@@ -12,6 +12,7 @@ class CryptoSignal(Base):
     price = Column(Float)
     percent_change_24h = Column(Float)
     rsi = Column(Float, nullable=True)
+    technical_signal = Column(String, nullable=True)
     
     # --- NUEVOS CAMPOS IA ---
     ai_score = Column(Integer, nullable=True)    # 0-100
@@ -27,7 +28,7 @@ class StockSignal(Base):
     price = Column(Float)
     percent_change = Column(Float)
     rsi = Column(Float, nullable=True)
-    
+    technical_signal = Column(String, nullable=True)
     # --- NUEVOS CAMPOS IA ---
     ai_score = Column(Integer, nullable=True)
     ai_decision = Column(String, nullable=True)
@@ -47,7 +48,6 @@ class Trade(Base):
     status = Column(String, default="OPEN")
     bought_at = Column(DateTime, default=datetime.utcnow)
     
-    # ESTOS CAMPOS FALTABAN EN EL CÓDIGO (aunque estuvieran en la DB):
     exit_price = Column(Float, nullable=True)
     sell_reason = Column(String, nullable=True)
     closed_at = Column(DateTime, nullable=True)

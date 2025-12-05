@@ -163,6 +163,7 @@ def analyze_market(threshold: float = -5.0, db: Session = Depends(get_db)):
             symbol=op['symbol'], name=op['name'], 
             price=op['price'], percent_change_24h=op['percent_change_24h'],
             rsi=op['rsi'],
+            technical_signal=op.get('technical_signal','N/A'),
             ai_score=ai_analysis.get('score', 50),
             ai_decision=ai_analysis.get('decision', 'NEUTRAL'),
             ai_reason=ai_analysis.get('reason', 'Sin datos')
@@ -212,6 +213,7 @@ def analyze_stocks(threshold: float = -3.0, db: Session = Depends(get_db)):
             symbol=op['symbol'], 
             price=op['price'], percent_change=op['percent_change'],
             rsi=op['rsi'],
+            technical_signal=op.get('technical_signal'),
             ai_score=ai_analysis.get('score'),
             ai_decision=ai_analysis.get('decision'),
             ai_reason=ai_analysis.get('reason')
@@ -261,6 +263,7 @@ def analyze_merval(threshold: float = -2.0, db: Session = Depends(get_db)):
             price=op['price'], 
             percent_change=op['percent_change'],
             rsi=op['rsi'],
+            technical_signal=op.get('technical_signal'),
             ai_score=ai_analysis.get('score'),
             ai_decision=ai_analysis.get('decision'),
             ai_reason=ai_analysis.get('reason')
@@ -359,26 +362,72 @@ def view_portfolio(db: Session = Depends(get_db)):
     return portfolio
 
 # === NUEVO ENDPOINT PARA EL DASHBOARD ===
-@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])  #include_in_schema=False #Si lo agregamos en los parametros se puede ocultar este endpoint de la doc
+@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
 def dashboard(request: Request, db: Session = Depends(get_db)):
     """
-    Este endpoint sirve la interfaz gráfica. 
-    
-    # 🚀 [HAZ CLIC AQUÍ PARA ABRIR EL DASHBOARD](/dashboard)
-    
-    *(El botón 'Try it out' de abajo solo te mostrará el código HTML crudo)*
+    Dashboard inteligente que unifica Criptos y Stocks corrigiendo nombres de columnas.
     """
-    # 1. Buscamos qué señales se detectaron en las últimas 24 horas
-    last_24h = datetime.utcnow() - timedelta(hours=24)
+    # 1. Recuperar últimos registros de ambas tablas
+    recent_cryptos = db.query(CryptoSignal).order_by(CryptoSignal.detected_at.desc()).limit(20).all()
+    recent_stocks = db.query(StockSignal).order_by(StockSignal.detected_at.desc()).limit(20).all()
     
-    recent_cryptos = db.query(CryptoSignal.symbol).filter(CryptoSignal.detected_at >= last_24h).distinct().all()
-    recent_stocks = db.query(StockSignal.symbol).filter(StockSignal.detected_at >= last_24h).distinct().all()
+    normalized_ops = []
+
+    # 2. Normalizar Criptos (Mapear percent_change_24h -> percent_change)
+    for c in recent_cryptos:
+        normalized_ops.append({
+            "symbol": c.symbol,
+            "name": c.name,
+            "price": c.price,
+            "percent_change": c.percent_change_24h, # <--- AQUÍ ESTÁ EL FIX
+            "rsi": c.rsi,
+            "technical_signal": c.technical_signal,
+            "ai_score": c.ai_score,
+            "ai_decision": c.ai_decision,
+            "ai_reason": c.ai_reason,
+            "detected_at": c.detected_at
+        })
+
+    # 3. Normalizar Stocks (Ya tienen percent_change, pero unificamos estructura)
+    for s in recent_stocks:
+        normalized_ops.append({
+            "symbol": s.symbol,
+            "name": s.symbol, # Stocks no tienen campo 'name' en tu DB, usamos symbol
+            "price": s.price,
+            "percent_change": s.percent_change,
+            "rsi": s.rsi,
+            "technical_signal": s.technical_signal,
+            "ai_score": s.ai_score,
+            "ai_decision": s.ai_decision,
+            "ai_reason": s.ai_reason,
+            "detected_at": s.detected_at
+        })
+
+    # 4. Ordenar todo por fecha (lo más nuevo arriba)
+    normalized_ops.sort(key=lambda x: x['detected_at'], reverse=True)
+
+    # 5. Calcular datos del Portafolio (Paper Trading)
+    portfolio_items = db.query(Trade).filter(Trade.status == "OPEN").all()
+    total_invested = sum(item.invested_amount for item in portfolio_items)
     
-    opportunities = set([row[0] for row in recent_cryptos] + [row[0] for row in recent_stocks])
-    
+    # Calculamos valor actual estimado (usando precio de entrada si no hay live price para no demorar)
+    current_val_est = 0
+    for item in portfolio_items:
+        current_val_est += item.invested_amount # Simplificado para visualización rápida
+        # Si quisieras PnL real en dashboard, habría que llamar a APIs, pero lo haría lento.
+        # Mejor dejarlo estático o usar el precio de salida si existiera.
+
+    total_pnl = current_val_est - total_invested # Dará 0 hasta que implementes live prices en dashboard
+
     return templates.TemplateResponse("dashboard.html", {
-        "request": request, 
-        "opportunities": sorted(list(opportunities))
+        "request": request,
+        "opportunities": normalized_ops, # <--- Ahora enviamos diccionarios limpios
+        "portfolio": {
+            "total_invested": total_invested,
+            "current_value": current_val_est,
+            "pnl": total_pnl,
+            "pnl_percent": 0
+        }
     })
 
 # --- NUEVO ENDPOINT WEB DEL PORTAFOLIO ---
@@ -514,7 +563,7 @@ def format_detailed_message(title: str, signals: list):
 
 # --- ARRANQUE DEL SERVIDOR ---
 if __name__ == "__main__":
-    hostsv="0.0.0.0" #local es "127.0.0.1"
+    hostsv="127.0.0.1" #local es "127.0.0.1"
     print("--- Iniciando servidor modular ---")
     print(f"Documentación disponible en: http://{hostsv}:8000/docs")
     print(f"Cliente: http://192.168.0.50:8000/docs")
