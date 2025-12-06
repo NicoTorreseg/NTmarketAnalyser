@@ -494,7 +494,7 @@ def run_analysis_cycle(db: Session, market_type: str, threshold: float):
     return saved_signals
 # --- ARRANQUE DEL SERVIDOR ---
 if __name__ == "__main__":
-    hostsv="127.0.0.1" #local es "127.0.0.1"
+    hostsv="0.0.0.0" #local es "127.0.0.1"
     print("--- Iniciando servidor modular ---")
     print(f"Documentación disponible en: http://{hostsv}:8000/docs")
     print(f"Cliente: http://192.168.0.50:8000/docs")
