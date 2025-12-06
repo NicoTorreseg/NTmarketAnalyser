@@ -20,60 +20,68 @@ class NewsIntel:
 
     def get_sentiment_analysis(self, symbol: str, asset_name: str = "", is_crypto: bool = True, is_merval: bool = False) -> dict:
         """
-        Busca noticias con contexto (Crypto vs Stock vs Merval) y analiza con IA.
+        Busca noticias con contexto dinámico de idioma y región.
         """
-        # 1. CONSTRUCCIÓN DE BÚSQUEDA INTELIGENTE
-        if is_crypto:
-            search_term = f"{asset_name} cryptocurrency" if asset_name else f"{symbol} crypto coin"
-        elif is_merval:
-            # Contexto explícito para Argentina para que encuentre noticias financieras
-            search_term = f"{symbol} stock argentina finanzas" 
+        # 1. AJUSTE DE IDIOMA SEGÚN MERCADO 🔥
+        if is_merval:
+            # Si es Merval, forzamos Español y región Argentina
+            self.googlenews = GoogleNews(lang='es', region='AR')
+            # Limpiamos el nombre (a veces viene como "Grupo Financiero Galicia S.A.")
+            clean_name = asset_name.split(' inc')[0].split(' S.A.')[0].split(' Corp')[0]
+            # Búsqueda más natural para diarios argentinos
+            search_term = f"{clean_name} acciones economía"
         else:
-            search_term = f"{symbol} stock news"
+            # Para Crypto y Stocks USA, seguimos en Inglés
+            self.googlenews = GoogleNews(lang='en') 
+            if is_crypto:
+                search_term = f"{asset_name} cryptocurrency" if asset_name else f"{symbol} crypto coin"
+            else:
+                search_term = f"{symbol} stock news"
 
-        print(f"🧠 [IA] Buscando: '{search_term}'...")
+        print(f"🧠 [IA] Buscando ({'ES' if is_merval else 'EN'}): '{search_term}'...")
         
+        # 2. EJECUCIÓN (Igual que antes)
         self.googlenews.clear()
         self.googlenews.search(search_term)
         results = self.googlenews.result()
         
-        # Reintento de respaldo
-        if not results and is_crypto:
-             print(f"   ⚠️ Reintentando con símbolo: {symbol}...")
-             self.googlenews.clear()
-             self.googlenews.search(f"{symbol} crypto")
+        # Reintento inteligente para Merval
+        if not results and is_merval:
+             print(f"   ⚠️ Reintentando con ticker: {symbol}...")
+             self.googlenews.search(f"{symbol} acciones merval")
              results = self.googlenews.result()
 
         if not results:
-            return {"score": 50, "decision": "NEUTRAL", "reason": f"No se encontraron noticias recientes para {search_term}"}
+            return {"score": 50, "decision": "NEUTRAL", "reason": f"Sin noticias para {search_term}"}
 
-        # Tomamos los 5 titulares más recientes
+        # 3. PROMPT CONTEXTUALIZADO (Ajustamos el rol de la IA)
         top_news = [f"- {item['title']} (Source: {item['media']})" for item in results[:5]]
         news_text = "\n".join(top_news)
 
-        # 2. El Prompt (Tu original + Variable de contexto Merval)
         if is_crypto:
             asset_type = "cryptocurrency"
-            role_extension = ""
+            role = "Crypto Analyst, Senior Financial Analyst "
         elif is_merval:
-            asset_type = "Argentine Stock/ADR"
-            role_extension = " expert in Emerging Markets and Argentina Volatility"
+            asset_type = "Argentine Stock, "
+            # 🔥 Le decimos a la IA que piense como experto en Latam
+            role = "Senior Financial Analyst in Emerging Markets and Argentina (Merval)" 
         else:
             asset_type = "stock"
-            role_extension = ""
+            role = "Senior Financial Analyst Wall Street Expert"
         
         prompt = f"""
-        Role: Senior Financial Analyst{role_extension}.
+        Role: {role}.
         Asset: {asset_name if asset_name else symbol} ({asset_type}).
         Ticker: {symbol}
         
-        Recent Headlines found:
+        Recent Headlines:
         {news_text}
 
         Task: 
-        1. Filter out irrelevant news (e.g., if analyzing 'Dash' crypto, ignore 'DoorDash' stocks).
-        2. Analyze the sentiment ONLY based on relevant news.
+        1. Analyze sentiment considering local economic context (inflation, regulations).
+        2. Filter out irrelevant news (e.g., if analyzing 'Dash' crypto, ignore 'DoorDash' stocks).
         3. Identify FUD, Hype, or Fundamentals.
+        4. Analyze the sentiment ONLY based on relevant news.
 
         Response format (JSON only):
         {{
@@ -462,7 +470,36 @@ class MarketAnalyzer:
         if min_vol > 0 and 'volume' in df.columns:
             mask = mask & (df['volume'] > min_vol)
             
-        filtered = df[mask]
+        filtered = df[mask].copy() # Importante usar .copy() para evitar warnings
+
+    # 🔥 NUEVO: FILTRO ANTI-REPETIDOS 🔥
+    # Si tenemos la columna 'description' (Nombre de la empresa), borramos duplicados.
+    # keep='first' significa que se queda con el primero que aparece y borra los demás.
+        if 'description' in filtered.columns:
+            # 1. Función lambda para limpiar "basura" financiera
+            def clean_name(text):
+                if not isinstance(text, str): return str(text)
+                text = text.upper()
+                # Lista de palabras 'ruido' que hacen que los nombres parezcan distintos
+                noise_words = [
+                    " CEDEAR", " ADR", " S.A.", " SA", " INC.", " INC", " CORP", " LTD", 
+                    " PLC", " AG", " SHS", " CERT DEPOSITO", " ARG REPR", " SP ADR"
+                ]
+                for word in noise_words:
+                    text = text.replace(word, "")
+                # Truco extra: Quedarse solo con las primeras 2 palabras suele bastar
+                # para diferenciar "Coca Cola" de "Banco Galicia"
+                return " ".join(text.split()[:2])
+
+            # 2. Creamos columna temporal 'clean_id'
+            filtered['clean_id'] = filtered['description'].apply(clean_name)
+            
+            len_antes = len(filtered)
+            # 3. Borramos duplicados basándonos en el nombre LIMPIO
+            filtered = filtered.drop_duplicates(subset=['clean_id'], keep='first')
+            
+            print(f"   ✂️ Deduplicación Agresiva: {len_antes} -> {len(filtered)} (Se borraron {len_antes - len(filtered)} repetidos).")
+
         opportunities = []
 
         # 3. UNIFICACIÓN DE FORMATO
