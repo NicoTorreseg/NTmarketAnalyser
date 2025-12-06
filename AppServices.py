@@ -298,86 +298,7 @@ class MarketAnalyzer:
             
         return df_tech
     
-    def find_stock_dips(self, threshold: float = -3.0) -> List[dict]:
-        """Escanea USA buscando caídas + Patrones técnicos."""
-        print(f"📡 Escaneando USA (Threshold: {threshold}%)...")
-        
-        # 1. Bajamos datos crudos
-        df_raw = self.scan_tradingview(markets=["america"], limit=800)
-        
-        # 2. Procesamos técnicos (para tener la columna 'Patrones_Hoy')
-        df = self._process_technicals(df_raw)
-        
-        if df.empty: return []
-
-        opportunities = []
-        
-        # 3. Filtramos: Caída fuerte Y liquidez decente
-        filtered = df[
-            (df['change'] <= threshold) & 
-            (df['volume'] > 50000)
-        ]
-
-        for _, row in filtered.iterrows():
-            # Datos básicos
-            rsi = row.get('RSI', 50)
-            patron = row.get('Patrones_Hoy') # Puede ser None o string
-            
-            # Crear mensaje técnico para el Dashboard/Telegram
-            tech_msg = []
-            if patron: tech_msg.append(f"🕯️ {patron}")
-            if rsi < 30: tech_msg.append(f"💎 Oversold ({round(rsi)})")
-            
-            signal_reason = " | ".join(tech_msg) if tech_msg else "Dip detected"
-
-            opportunities.append({
-                "symbol": row['name'],
-                "name": row.get('description', row['name']),
-                "price": float(row['close']),
-                "percent_change": float(row['change']),
-                "rsi": float(rsi) if pd.notna(rsi) else 50,
-                "exchange": "USA",
-                # Campo extra para mostrar el patrón en la UI
-                "technical_signal": signal_reason 
-            })
-
-        # Ordenar: Los que tienen patrón técnico van primero, luego por caída
-        opportunities.sort(key=lambda x: (x['technical_signal'] == "Dip detected", x['percent_change']))
-        return opportunities[:20]
-
-    def find_merval_dips(self, threshold: float = -2.0) -> List[dict]:
-        """Escanea Argentina buscando caídas + Patrones."""
-        print(f"📡 Escaneando MERVAL (Threshold: {threshold}%)...")
-        
-        df_raw = self.scan_tradingview(markets=["argentina"], limit=400)
-        df = self._process_technicals(df_raw)
-        
-        if df.empty: return []
-
-        opportunities = []
-        # Filtramos un poco más suave en volumen para Argentina
-        filtered = df[df['change'] <= threshold]
-
-        for _, row in filtered.iterrows():
-            rsi = row.get('RSI', 50)
-            patron = row.get('Patrones_Hoy')
-            
-            tech_msg = []
-            if patron: tech_msg.append(f"🕯️ {patron}")
-            if rsi < 30: tech_msg.append(f"💎 Oversold ({round(rsi)})")
-            
-            opportunities.append({
-                "symbol": row['name'],
-                "name": row.get('description', row['name']),
-                "price": float(row['close']),
-                "percent_change": float(row['change']),
-                "rsi": float(rsi) if pd.notna(rsi) else 50,
-                "exchange": "BCBA",
-                "technical_signal": " | ".join(tech_msg) if tech_msg else "Dip"
-            })
-
-        opportunities.sort(key=lambda x: x['percent_change'])
-        return opportunities[:20]
+    
     
 
     def get_current_price(self, symbol: str) -> float:
@@ -509,56 +430,73 @@ class MarketAnalyzer:
             print(f"Error CoinMarketCap: {e}")
             return []
 
-    def find_dip_opportunities(self, threshold: float = -5.0) -> List[dict]:
-        print(f"📡 Escaneando Cripto Coins (Threshold: {threshold}%)...")
+    def find_market_opportunities(self, market_type: str, threshold: float) -> List[dict]:
+        """
+        Escáner Universal: Sirve para Crypto, USA y Merval.
+        market_type: 'CRYPTO', 'USA', 'MERVAL'
+        """
+        print(f"📡 Escaneando {market_type} (Threshold: {threshold}%)...")
         
-        # PASO 1: Obtener Datos (Función 1)
-        df_raw = self.scan_coin_market(limit=300)
-        
-        # PASO 2: Procesar Técnicos (Función 2)
-        df = self._process_crypto_technicals(df_raw)
-        
-        if df.empty: 
-            print("⚠️ TV Crypto devolvió DataFrame vacío.")
-            return []
+        # 1. ELEGIR FUENTE DE DATOS
+        if market_type == 'CRYPTO':
+            df_raw = self.scan_coin_market(limit=300)
+            df = self._process_crypto_technicals(df_raw)
+            col_change = 'change' # En tu código crypto ya lo renombraste a 'change'
+            min_vol = 0 # Opcional
+        elif market_type == 'USA':
+            df_raw = self.scan_tradingview(markets=["america"], limit=800)
+            df = self._process_technicals(df_raw)
+            col_change = 'change'
+            min_vol = 50000 # Filtro de volumen para USA
+        elif market_type == 'MERVAL':
+            df_raw = self.scan_tradingview(markets=["argentina"], limit=400)
+            df = self._process_technicals(df_raw)
+            col_change = 'change'
+            min_vol = 0
 
-        # Validación final de columnas críticas
-        if 'base_currency' not in df.columns:
-            print(f"⚠️ Error: No se encontró 'base_currency'. Cols: {list(df.columns)[:5]}")
-            return []
-        
-        if 'change' not in df.columns:
-            print("⚠️ Error: No se encontró la columna de cambio (change).")
-            return []
+        if df.empty: return []
 
-        # PASO 3: Filtrar y Mapear
-        filtered = df[df['change'] <= threshold]
-
-        opportunities = []
-        for _, row in filtered.iterrows():
-            patron = row.get('Patrones_Hoy')
-            rsi = row.get('RSI', 50)
+        # 2. FILTRADO COMÚN
+        # Filtramos por caída y volumen (si aplica)
+        mask = (df[col_change] <= threshold)
+        if min_vol > 0 and 'volume' in df.columns:
+            mask = mask & (df['volume'] > min_vol)
             
-            # Mensaje técnico
+        filtered = df[mask]
+        opportunities = []
+
+        # 3. UNIFICACIÓN DE FORMATO
+        for _, row in filtered.iterrows():
+            # Lógica de RSI y Velas (Idéntica para todos)
+            rsi = row.get('RSI', 50)
+            patron = row.get('Patrones_Hoy')
+            
             tech_msg = []
             if patron: tech_msg.append(f"🕯️ {patron}")
             if rsi < 30: tech_msg.append(f"💎 Oversold ({round(rsi)})")
             
-            signal_reason = " | ".join(tech_msg) if tech_msg else "Crypto Dip"
+            signal_reason = " | ".join(tech_msg) if tech_msg else "Dip detected"
+            
+            # Detectar nombre y símbolo según el mercado
+            symbol = row.get('base_currency', row.get('name'))
+            name = row.get('base_currency_desc', row.get('description', symbol))
 
             opportunities.append({
-                "symbol": row['base_currency'],
-                "name": row.get('base_currency_desc', row['base_currency']), 
+                "symbol": symbol,
+                "name": name,
                 "price": float(row['close']),
-                "percent_change_24h": float(row['change']),
+                "percent_change": float(row[col_change]), # Unificamos nombre del campo
                 "rsi": float(rsi) if pd.notna(rsi) else 50,
                 "technical_signal": signal_reason,
+                # Datos vacíos de IA para llenar después
                 "ai_score": None, "ai_decision": None, "ai_reason": None
             })
 
-        opportunities.sort(key=lambda x: x['percent_change_24h'])
-        print(f"   ✅ Se encontraron {len(opportunities)} criptos.")
-        return opportunities[:15]
+        opportunities.sort(key=lambda x: x['percent_change'])
+        return opportunities[:20]
+    
+
+    
     
     # def find_stock_dips(self, threshold: float = -3.0) -> List[dict]:
     #     opportunities = []

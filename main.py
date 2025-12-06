@@ -137,150 +137,20 @@ def root():
 
 @app.get("/analyze", response_model=List[CoinSignalSchema])
 def analyze_market(threshold: float = -5.0, db: Session = Depends(get_db)):
-    """
-    Busca Criptos + IA y envía reporte DETALLADO a Telegram.
-    """
-    news_intel = NewsIntel()
-    opportunities = analyzer.find_dip_opportunities(threshold)
-    saved_signals = []
-    
-    print(f"🔎 [MANUAL] Analizando {len(opportunities)} oportunidades con IA...")
-    Notifier.send_telegram_alert(f"🔎 **Iniciando Análisis Manual...**\nDetectados {len(opportunities)} activos. Procesando con IA...")
-
-    for op in opportunities:
-        # IA Analysis
-        try:
-            ai_analysis = news_intel.get_sentiment_analysis(
-                    symbol=op['symbol'], 
-                    asset_name=op['name'], 
-                    is_crypto=True
-                )
-        except Exception as e:
-            ai_analysis = {"score": 50, "decision": "ERROR", "reason": "Error IA"}
-
-        # Guardar DB
-        db_signal = CryptoSignal(
-            symbol=op['symbol'], name=op['name'], 
-            price=op['price'], percent_change_24h=op['percent_change_24h'],
-            rsi=op['rsi'],
-            technical_signal=op.get('technical_signal','N/A'),
-            ai_score=ai_analysis.get('score', 50),
-            ai_decision=ai_analysis.get('decision', 'NEUTRAL'),
-            ai_reason=ai_analysis.get('reason', 'Sin datos')
-        )
-        db.add(db_signal)
-        db.commit()
-        db.refresh(db_signal)
-        saved_signals.append(db_signal)
-    
-    # 🔥 ENVIAR REPORTE DETALLADO (INCLUYENDO LOS 'WAIT') 🔥
-    if saved_signals:
-        full_msg = format_detailed_message("ANÁLISIS MANUAL CRIPTO", saved_signals)
-        # Dividir mensaje si es muy largo (Telegram limite 4096 chars)
-        if len(full_msg) > 4000:
-            Notifier.send_telegram_alert(full_msg[:4000] + "...")
-            Notifier.send_telegram_alert("...(continuación) " + full_msg[4000:])
-        else:
-            Notifier.send_telegram_alert(full_msg)
-    else:
-        Notifier.send_telegram_alert("🤷‍♂️ No se encontraron oportunidades con ese filtro.")
-
-    return saved_signals
+    return run_analysis_cycle(db, 'CRYPTO', threshold)
 
 @app.get("/analyze/stocks", response_model=List[StockSignalSchema])
 def analyze_stocks(threshold: float = -3.0, db: Session = Depends(get_db)):
-    """
-    Igual que criptos, pero para Acciones (Stocks) con reporte DETALLADO.
-    """
-    news_intel = NewsIntel()
-    opportunities = analyzer.find_stock_dips(threshold)
-    saved_signals = []
-    
-    print(f"🔎 [MANUAL STOCKS] Analizando {len(opportunities)} acciones con IA...")
-    Notifier.send_telegram_alert(f"🔎 **Iniciando Análisis Stocks...**\nDetectadas {len(opportunities)} acciones.")
-
-    for op in opportunities:
-        try:
-            ai_analysis = news_intel.get_sentiment_analysis(
-                        symbol=op['symbol'], 
-                        asset_name="", 
-                        is_crypto=False
-                    )
-        except:
-            ai_analysis = {"score": 50, "decision": "NEUTRAL", "reason": "Sin datos"}
-
-        db_signal = StockSignal(
-            symbol=op['symbol'], 
-            price=op['price'], percent_change=op['percent_change'],
-            rsi=op['rsi'],
-            technical_signal=op.get('technical_signal'),
-            ai_score=ai_analysis.get('score'),
-            ai_decision=ai_analysis.get('decision'),
-            ai_reason=ai_analysis.get('reason')
-        )
-        db.add(db_signal)
-        db.commit()
-        db.refresh(db_signal)
-        saved_signals.append(db_signal)
-        
-    # 🔥 ENVIAR REPORTE DETALLADO STOCKS 🔥
-    if saved_signals:
-        full_msg = format_detailed_message("ANÁLISIS MANUAL STOCKS", saved_signals)
-        Notifier.send_telegram_alert(full_msg)
-    else:
-        Notifier.send_telegram_alert("🤷‍♂️ Sin oportunidades en Stocks.")
-
-    return saved_signals
+    return run_analysis_cycle(db, 'USA', threshold)
 
 @app.get("/analyze/Merval", response_model=List[StockSignalSchema])
 def analyze_merval(threshold: float = -2.0, db: Session = Depends(get_db)):
     """
     Escanea ADRs Argentinos en Dólares (YPF, GGAL, MELI, etc.)
+    Usa el motor unificado con el perfil 'MERVAL'.
     """
-    news_intel = NewsIntel()
-    # 1. Análisis Técnico (Usamos la nueva función)
-    opportunities = analyzer.find_merval_dips(threshold)
-    saved_signals = []
-    
-    print(f"🧉 [MERVAL USD] Analizando {len(opportunities)} ADRs...")
-    Notifier.send_telegram_alert(f"🇦🇷 **Iniciando Escaneo Merval (USD)...**\nDetectadas {len(opportunities)} oportunidades.")
-
-    # 2. Análisis IA
-    for op in opportunities:
-        try:
-            # is_crypto=False para que busque noticias financieras estándar
-            ai_analysis = news_intel.get_sentiment_analysis(
-                        symbol=op['symbol'], 
-                        asset_name="", 
-                        is_crypto=False
-                    )
-        except:
-            ai_analysis = {"score": 50, "decision": "NEUTRAL", "reason": "Sin datos"}
-
-        # Guardamos en la tabla de Stocks (mismo esquema)
-        db_signal = StockSignal(
-            symbol=op['symbol'], 
-            price=op['price'], 
-            percent_change=op['percent_change'],
-            rsi=op['rsi'],
-            technical_signal=op.get('technical_signal'),
-            ai_score=ai_analysis.get('score'),
-            ai_decision=ai_analysis.get('decision'),
-            ai_reason=ai_analysis.get('reason')
-        )
-        db.add(db_signal)
-        saved_signals.append(db_signal)
-        
-    db.commit()
-        
-    # 3. Reporte Telegram
-    if saved_signals:
-        full_msg = format_detailed_message("🇦🇷 REPORTE MERVAL (Wall St)", saved_signals)
-        Notifier.send_telegram_alert(full_msg)
-    else:
-        Notifier.send_telegram_alert("🤷‍♂️ Merval estable. Sin caídas fuertes en USD.")
-
-    return saved_signals
+    # Toda la magia ocurre aquí dentro 👇
+    return run_analysis_cycle(db, 'MERVAL', threshold)
 
 # ==========================================
 # --- NUEVOS ENDPOINTS: TRADING & SENTIMENT ---
@@ -567,9 +437,64 @@ def format_detailed_message(title: str, signals: list):
     
     return msg
 
+def run_analysis_cycle(db: Session, market_type: str, threshold: float):
+    news_intel = NewsIntel()
+    
+    # 1. Usamos el nuevo Escáner Universal
+    opportunities = analyzer.find_market_opportunities(market_type, threshold)
+    saved_signals = []
+    
+    msg_inicio = f"🔎 Iniciando Análisis {market_type} ({len(opportunities)} activos)..."
+    print(msg_inicio)
+    Notifier.send_telegram_alert(msg_inicio)
+
+    for op in opportunities:
+        # 2. Análisis IA (Lógica Unificada)
+        # Determinamos si es crypto o merval para el contexto de la noticia
+        is_crypto = (market_type == 'CRYPTO')
+        is_merval = (market_type == 'MERVAL')
+        
+        try:
+            ai_analysis = news_intel.get_sentiment_analysis(
+                symbol=op['symbol'], 
+                asset_name=op['name'], 
+                is_crypto=is_crypto,
+                is_merval=is_merval
+            )
+        except:
+            ai_analysis = {"score": 50, "decision": "NEUTRAL", "reason": "Error IA"}
+
+        # 3. Guardado Polimórfico (Aquí el único IF necesario)
+        if market_type == 'CRYPTO':
+            db_signal = CryptoSignal(
+                symbol=op['symbol'], name=op['name'], 
+                price=op['price'], percent_change_24h=op['percent_change'], # Ojo: unificamos a percent_change en el scanner
+                rsi=op['rsi'], technical_signal=op['technical_signal'],
+                ai_score=ai_analysis.get('score'), ai_decision=ai_analysis.get('decision'), ai_reason=ai_analysis.get('reason')
+            )
+        else:
+            # Stock y Merval usan la misma tabla StockSignal
+            db_signal = StockSignal(
+                symbol=op['symbol'], 
+                price=op['price'], percent_change=op['percent_change'],
+                rsi=op['rsi'], technical_signal=op['technical_signal'],
+                ai_score=ai_analysis.get('score'), ai_decision=ai_analysis.get('decision'), ai_reason=ai_analysis.get('reason')
+            )
+            
+        db.add(db_signal)
+        saved_signals.append(db_signal) # Guardamos para el reporte
+    
+    db.commit()
+    
+    # 4. Reporte Unificado
+    if saved_signals:
+        full_msg = format_detailed_message(f"REPORTE {market_type}", saved_signals)
+        Notifier.send_telegram_alert(full_msg)
+    
+    return saved_signals
 # --- ARRANQUE DEL SERVIDOR ---
 if __name__ == "__main__":
-    hostsv="0.0.0.0" #local es "127.0.0.1"
+    hostsv="127.0.0.1" #local es "127.0.0.1"
     print("--- Iniciando servidor modular ---")
     print(f"Documentación disponible en: http://{hostsv}:8000/docs")
     print(f"Cliente: http://192.168.0.50:8000/docs")
