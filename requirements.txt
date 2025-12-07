@@ -9,3 +9,4 @@ jinja2
 GoogleNews
 google-generativeai
 python-dotenv
+groq

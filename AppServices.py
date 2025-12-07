@@ -4,12 +4,14 @@ import pandas as pd
 from typing import List
 from config import (
     CMC_API_KEY, CMC_BASE_URL, USE_MOCK_DATA, WATCHLIST_STOCKS, WATCHLIST_MERVAL,
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GEMINI_API_KEY,
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GEMINI_API_KEY, GROQ_API_KEY,
     TV_HEADERS, TV_COOKIES, TV_COLUMNS, TV_RAW_LISTS,
     TV_COIN_URL, TV_COIN_COLUMNS # <--- IMPORTANTE: Nuevas variables
 )
 from GoogleNews import GoogleNews
 import google.generativeai as genai
+
+from groq import Groq
 
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -17,6 +19,19 @@ class NewsIntel:
     def __init__(self):
         self.googlenews = GoogleNews(lang='en', period='1d') # Noticias de últimas 24h
         self.model = genai.GenerativeModel('gemini-2.5-flash')
+
+        self.model_premium = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # --- NIVEL 2: EL TANQUE (Google 2.0) ---
+        # Aparece en tu lista como 'models/gemini-2.0-flash'. Es rápido y estable.
+        self.model_backup_google = genai.GenerativeModel('gemini-2.0-flash')
+
+        # --- NIVEL 3: LA EMERGENCIA (Groq) ---
+        # Si Google falla totalmente, usamos Llama 3 en Groq.
+        if GROQ_API_KEY:
+            self.groq_client = Groq(api_key=GROQ_API_KEY)
+        else:
+            self.groq_client = None
 
 
     def get_sentiment_analysis(self, symbol: str, asset_name: str = "", is_crypto: bool = True, is_merval: bool = False) -> dict:
@@ -92,16 +107,47 @@ class NewsIntel:
         }}
         """
 
+        # 3. LÓGICA DE TRIPLE RESPALDO 🔥
+        clean_json = ""
+        
+        # --- INTENTO 1: Google Gemini 2.5 ---
         try:
-            response = self.model.generate_content(prompt)
+            response = self.model_premium.generate_content(prompt)
             clean_json = response.text.replace("```json", "").replace("```", "").strip()
-            import json
-            analysis = json.loads(clean_json)
-            return analysis
         except Exception as e:
-            print(f"❌ Error IA: {e}")
-            return {"score": 50, "decision": "ERROR", "reason": "Fallo en IA"}
+            print(f"   ⚠️ Gemini 2.5 falló (Cuota). Probando Gemini 2.0...")
+            
+            # --- INTENTO 2: Google Gemini 2.0 ---
+            try:
+                response = self.model_backup_google.generate_content(prompt)
+                clean_json = response.text.replace("```json", "").replace("```", "").strip()
+            except Exception as e2:
+                print(f"   ⚠️ Gemini 2.0 falló. Probando Groq (Llama 3)...")
+                
+                # --- INTENTO 3: Groq (Llama 3) ---
+                if self.groq_client:
+                    try:
+                        chat_completion = self.groq_client.chat.completions.create(
+                            messages=[
+                                {"role": "system", "content": "You are a financial analyst JSON machine."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            model="llama-3.3-70b-versatile", # Modelo muy potente y gratis en Groq
+                            temperature=0,
+                        )
+                        clean_json = chat_completion.choices[0].message.content.replace("```json", "").replace("```", "").strip()
+                    except Exception as e3:
+                        print(f"❌ Error Fatal (Fallaron las 3 IAs): {e3}")
+                        return {"score": 50, "decision": "ERROR", "reason": "Fallo Total IA"}
+                else:
+                    return {"score": 50, "decision": "ERROR", "reason": "Fallo Google y sin Groq Key"}
 
+        # 4. PARSEO FINAL
+        try:
+            import json
+            return json.loads(clean_json)
+        except:
+            return {"score": 50, "decision": "ERROR", "reason": "Error leyendo JSON"}
 # --- CLASE NOTIFICADOR ---
 class Notifier:
     """Encargada de enviar alertas a Telegram."""
@@ -135,6 +181,85 @@ class MarketAnalyzer:
         # Mantenemos self.headers por compatibilidad si algo lo usa, pero apuntando a lo mismo
         self.headers = self.cmc_headers
 
+    # --- AYUDANTES PARA PRECIO INDIVIDUAL (TRADINGVIEW) ---
+    # --- AYUDANTES PARA PRECIO INDIVIDUAL ---
+    
+    def _fetch_tv_price_stock(self, symbol: str, markets: list) -> float:
+        """Busca el precio de UNA acción en TradingView Scanner."""
+        url = 'https://scanner.tradingview.com/global/scan'
+        # Ajuste para Yahoo/TV: Si viene con .BA, quitamos para TV, o viceversa si fuera necesario.
+        clean_symbol = symbol.replace(".BA", "")
+        
+        payload = {
+            "columns": ["close"],
+            "filter": [
+                {"left": "name", "operation": "equal", "right": clean_symbol.upper()}
+            ],
+            "options": {"lang": "es"},
+            "markets": markets,
+            "range": [0, 1]
+        }
+        try:
+            r = requests.post(url, headers=TV_HEADERS, cookies=TV_COOKIES, json=payload, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if data['data']:
+                    price = data['data'][0]['d'][0]
+                    # print(f"   ✅ TV Stock ({symbol}): ${price}")
+                    return float(price)
+        except Exception:
+            pass
+        return 0.0
+
+    def _fetch_cmc_price(self, symbol: str) -> float:
+        """Fuente #1 para Cryptos: CoinMarketCap."""
+        try:
+            url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+            params = {'symbol': symbol, 'convert': 'USD'}
+            r = requests.get(url, headers=self.cmc_headers, params=params, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                # CMC puede devolver varios para el mismo símbolo, tomamos el primero (mayor rank)
+                if symbol.upper() in data['data']:
+                    crypto_data = data['data'][symbol.upper()]
+                    # Si es una lista (varios tokens con mismo nombre), tomamos el [0]
+                    if isinstance(crypto_data, list):
+                        price = crypto_data[0]['quote']['USD']['price']
+                    else:
+                        price = crypto_data['quote']['USD']['price']
+                    
+                    # print(f"   ✅ CMC Crypto ({symbol}): ${price}")
+                    return float(price)
+        except Exception as e:
+            # print(f"   ⚠️ CMC Error ({symbol}): {e}")
+            pass
+        return 0.0
+
+    def _fetch_binance_price(self, symbol: str) -> float:
+        """Fuente #2 para Cryptos: Binance."""
+        try:
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.upper()}USDT"
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200:
+                return float(r.json()['price'])
+        except: pass
+        return 0.0
+
+    def _fetch_tv_price_crypto(self, symbol: str) -> float:
+        """Fuente #3 para Cryptos: TradingView Crypto."""
+        payload = {
+            "columns": ["close"],
+            "filter": [{"left": "base_currency", "operation": "equal", "right": symbol.upper()}],
+            "options": {"lang": "es"},
+            "markets": ["coin"],
+            "range": [0, 1]
+        }
+        try:
+            r = requests.post(TV_COIN_URL, headers=TV_HEADERS, cookies=TV_COOKIES, json=payload, timeout=5)
+            if r.status_code == 200 and r.json()['data']:
+                return float(r.json()['data'][0]['d'][0])
+        except: pass
+        return 0.0
 
     # --- 3. SCANNER DE CRYPTO COINS (NUEVO) ---
     # --- 3. SCANNER DE CRYPTO COINS (Lógica de tradingview.py) ---
@@ -313,48 +438,66 @@ class MarketAnalyzer:
 
     def get_current_price(self, symbol: str) -> float:
         """
-        Intenta obtener el precio de 3 fuentes en orden:
-        1. Yahoo Finance (Stocks/Cripto)
-        2. Binance (Cripto API Pública)
-        3. CoinMarketCap (Tu API Key - Último recurso)
+        Lógica de Prioridades:
+        1. Si es MERVAL (Lista) -> TradingView ARG -> Yahoo.
+        2. Si es STOCK USA (Lista) -> TradingView USA -> Yahoo.
+        3. TODO LO DEMÁS -> Asumimos CRYPTO -> CoinMarketCap -> Binance -> TV Crypto.
         """
-        # --- A. INTENTO YAHOO FINANCE ---
-        try:
-            ticker_str = symbol if symbol in WATCHLIST_STOCKS or symbol in WATCHLIST_MERVAL else f"{symbol}-USD"
-            ticker = yf.Ticker(ticker_str)
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                return hist['Close'].iloc[-1]
-        except Exception:
-            pass # Falló Yahoo, seguimos...
-
-        # --- B. INTENTO BINANCE (Solo Criptos) ---
-        if symbol not in WATCHLIST_STOCKS or symbol not in WATCHLIST_MERVAL:
-            try:
-                # Binance usa pares sin guion, ej: BTCUSDT
-                url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
-                r = requests.get(url, timeout=3)
-                if r.status_code == 200:
-                    data = r.json()
-                    price = float(data['price'])
-                    print(f"✅ Precio {symbol} obtenido de Binance: {price}")
-                    return price
-            except Exception:
-                pass # Falló Binance, seguimos...
-
-        # --- C. INTENTO COINMARKETCAP (Fuente de Verdad) ---
-        try:
-            url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-            params = {'symbol': symbol, 'convert': 'USD'}
-            r = requests.get(url, headers=self.cmc_headers, params=params, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                price = data['data'][symbol]['quote']['USD']['price']
-                print(f"✅ Precio {symbol} obtenido de CoinMarketCap: {price}")
-                return price
-        except Exception as e:
-            print(f"❌ Fallaron todas las fuentes para {symbol}: {e}")
+        symbol = symbol.upper()
         
+        # --- Listas de Identificación ---
+        # Ampliamos la detección de Merval con la lista que pasaste antes
+        merval_tickers = [
+            "YPFD", "GGAL", "BMA", "PAMP", "TECO2", "TXAR", "ALUA", "CRES", "TGSU2", "TGNO4",
+            "EDN", "TRAN", "CEPU", "SUPV", "BYMA", "VALO", "CVH", "LOMA", "MIRG", "BHIP",
+            "BBAR", "BBARB", "COME", "MOLI", "LEDE", "SEMI", "MORI", "MOLA", "SAMI", "AGRO",
+            "INVJ", "GCLA", "GAMI", "GCDI", "CTIO", "GARO", "FERR", "RIGO", "LONG", "DOME", 
+            "RICH", "ROSE", "CELU", "CGPA2", "DGCE", "ECOG", "GBAN", "METR", "METRC", "HARG", 
+            "HSAT", "IEB", "A3", "VIST", "MELI", "GLOB", "ELP", "PBR", "TEN", "DESP", "BIOX"
+        ]
+        
+        # Unimos con la watchlist de config por si acaso
+        all_merval = set(merval_tickers + WATCHLIST_MERVAL)
+        
+        # 1. DETECCIÓN: ¿ES MERVAL?
+        if symbol in all_merval or symbol.endswith(".BA"):
+            # print(f"🔎 Buscando {symbol} en MERVAL...")
+            price = self._fetch_tv_price_stock(symbol, ["argentina"])
+            if price > 0: return price
+            
+            # Backup Yahoo Finance
+            try:
+                yf_sym = f"{symbol}.BA" if not symbol.endswith(".BA") and "." not in symbol else symbol
+                return yf.Ticker(yf_sym).fast_info.last_price or 0.0
+            except: pass
+
+        # 2. DETECCIÓN: ¿ES STOCK USA? (Solo los de tu Watchlist explícita)
+        elif symbol in WATCHLIST_STOCKS:
+            # print(f"🔎 Buscando {symbol} en STOCKS USA...")
+            price = self._fetch_tv_price_stock(symbol, ["america"])
+            if price > 0: return price
+            
+            # Backup Yahoo
+            try: return yf.Ticker(symbol).fast_info.last_price or 0.0
+            except: pass
+
+        # 3. TODO LO DEMÁS: ASUMIMOS CRYPTO (Prioridad CMC)
+        else:
+            # print(f"🔎 Buscando {symbol} en CRYPTO (CMC/Binance)...")
+            
+            # Opción A: CoinMarketCap (Tu preferida)
+            price = self._fetch_cmc_price(symbol)
+            if price > 0: return price
+            
+            # Opción B: Binance (Muy rápida para las comunes)
+            price = self._fetch_binance_price(symbol)
+            if price > 0: return price
+            
+            # Opción C: TradingView Crypto (Respaldo final para raras como HYPE)
+            price = self._fetch_tv_price_crypto(symbol)
+            if price > 0: return price
+
+        print(f"❌ No se encontró precio para {symbol}")
         return 0.0
 
     # --- MÉTODO EN CASCADA (FIX PARA COMPRAS) ---
@@ -440,7 +583,7 @@ class MarketAnalyzer:
             print(f"Error CoinMarketCap: {e}")
             return []
 
-    def find_market_opportunities(self, market_type: str, threshold: float) -> List[dict]:
+    def find_market_opportunities(self, market_type: str, threshold: float, tier1_threshold: float) -> List[dict]:
         """
         Escáner Universal Híbrido V2.
         - CRYPTO: Top 50 (Rank) vs Resto [INTACTO].
@@ -463,8 +606,8 @@ class MarketAnalyzer:
                 df['crypto_total_rank'] = pd.to_numeric(df['crypto_total_rank'], errors='coerce').fillna(999)
                 
                 # Tier 1 Crypto
-                THRESHOLD_TIER_1 = -2.5 
-                mask_top50 = (df['crypto_total_rank'] <= 50) & (df['change'] <= THRESHOLD_TIER_1)
+                #THRESHOLD_TIER_1 = -2.5 
+                mask_top50 = (df['crypto_total_rank'] <= 50) & (df['change'] <= tier1_threshold)
                 df_tier1 = df[mask_top50].copy()
                 
                 # Tier 2 Crypto
@@ -472,7 +615,7 @@ class MarketAnalyzer:
                 df_tier2 = df[mask_tier2].copy()
                 df_tier2 = df_tier2.sort_values(by='change', ascending=True).head(4)
                 
-                print(f"   📊 Crypto Tier 1 (Top 50): {len(df_tier1)} detectadas (Thresh: {THRESHOLD_TIER_1}%)")
+                print(f"   📊 Crypto Tier 1 (Top 50): {len(df_tier1)} detectadas (Thresh: {tier1_threshold}%)")
                 print(f"   📊 Crypto Tier 2 (Risk):   {len(df_tier2)} detectadas (Thresh: {threshold}%)")
                 
                 filtered = pd.concat([df_tier1, df_tier2])
@@ -487,53 +630,90 @@ class MarketAnalyzer:
             if market_type == 'USA':
                 df_raw = self.scan_tradingview(markets=["america"], limit=800)
                 min_vol = 50000 
-                tier1_threshold = -1.5 # USA es estable, -1.5% ya es descuento en Apple/Microsoft
             else: # MERVAL
-                df_raw = self.scan_tradingview(markets=["argentina"], limit=400)
+                df_raw = self.scan_tradingview(markets=["argentina"], limit=600)
                 min_vol = 0
-                tier1_threshold = -2.0 # Argentina es más volátil, pedimos un poco más de caída
             
             df = self._process_technicals(df_raw)
             col_change = 'change'
 
-            # B. Lógica de Filtrado por Niveles
+            # 🔥🔥 1. FILTRO DE LIMPIEZA INICIAL (Whitelisting) 🔥🔥
+            if market_type == 'MERVAL' and not df.empty and 'description' in df.columns:
+                cedear_keywords = 'CEDEAR|CERT DEP|ARG REPR|CERTIFICADO|DEPOSITO'
+                es_cedear = df['description'].str.contains(cedear_keywords, case=False, regex=True)
+                
+                # LISTA COMPLETA DE ACCIONES ARGENTINAS PURAS + VIPS
+                whitelist = [
+                    # --- TOP TIER & SEGUNDA LÍNEA (Líderes) ---
+                    "YPFD", "GGAL", "PAMP",
+                    "BMA", "BBAR", "TXAR", "ALUA", "CEPU", "TGSU2", "LOMA", "MIRG", "BHIP",
+                    "BBAR", "BBARB", "COME","MOLI", "LEDE", "SEMI", "MORI" 
+                    
+                    # --- PANEL GENERAL (Agro, Industria, Gas, Pequeñas) ---
+                    "TECO2", "CRES", "EDN", "TRAN", "TGNO4", 
+                    "SUPV", "BYMA", "VALO", "LOMA", "COME", "GLOB",
+                    "HARG", "HSAT", "IRCP", "IRSA", "JMIN", "LEAL", "MADX", "MAXI", "NAHU", 
+                    
+                    # --- VIPS / REGIONALES (Cedears permitidos) ---
+                    "VIST", "MELI", "GLOB", "ELP"
+                ]
+                
+                es_permitido = df['name'].isin(whitelist)
+                
+                # Nos quedamos con: (NO es Cedear) O (Está en la Whitelist)
+                mask_final = (~es_cedear) | (es_permitido)
+                df = df[mask_final].copy()
+                print(f"   🇦🇷 Filtro Merval: Quedan {len(df)} activos (Locales + VIPs).")
+
+            # 🔥🔥 2. DIVISIÓN DE TIERS Y FILTRADO DE PRECIO 🔥🔥
             if not df.empty and 'market_cap_basic' in df.columns:
-                # 1. Convertir Market Cap a números y ordenar (Las Gigantes primero)
                 df['market_cap_basic'] = pd.to_numeric(df['market_cap_basic'], errors='coerce').fillna(0)
                 if min_vol > 0 and 'volume' in df.columns:
                     df = df[df['volume'] > min_vol]
                 
-                # Ordenamos de mayor a menor capitalización
+                # Ordenamos por Market Cap
                 df = df.sort_values(by='market_cap_basic', ascending=False)
 
-                # 2. Dividir el universo: Top 30 vs El Resto
-                TOP_N = 30
-                limit_index = min(len(df), TOP_N)
+                # --- LÓGICA DE SEPARACIÓN (Aquí está el cambio clave) ---
+                if market_type == 'MERVAL':
+                    # Regla: Tier 1 son las Locales/VIP. Tier 2 son los ADRs "colados".
+                    mask_extranjera = df['description'].str.contains('ADR|CEDEAR|CERT DEP|ARG REPR', case=False, regex=True)
+                    
+                    # VIPs que forzamos a Tier 1 aunque sean Cedears
+                    vip_list = ['MELI', 'VIST', 'GLOB', 'PBR', 'TEN', 'TX']
+                    es_vip = df['name'].isin(vip_list)
+                    
+                    mask_t1_candidatos = (~mask_extranjera) | es_vip
+                    
+                    df_tier1_candidates = df[mask_t1_candidatos].copy()
+                    df_tier2_candidates = df[~mask_t1_candidatos].copy() # El resto (ADRs comunes)
                 
-                df_tier1_candidates = df.iloc[:limit_index] # Las 30 más grandes (YPF, GGAL / AAPL, MSFT)
-                df_tier2_candidates = df.iloc[limit_index:] # Small Caps / Panel General
+                else: # USA
+                    # Regla Clásica: Top 30 vs Resto
+                    TOP_N = 30
+                    limit_index = min(len(df), TOP_N)
+                    df_tier1_candidates = df.iloc[:limit_index]
+                    df_tier2_candidates = df.iloc[limit_index:]
 
-                # --- TIER 1: BLUE CHIPS (Calidad) ---
-                # Regla: Caída moderada (-1.5% o -2%). Sin límite de cantidad.
+                # --- APLICACIÓN DE THRESHOLDS ---
+                
+                # Tier 1 (Blue Chips) -> tier1_threshold
                 mask_t1 = (df_tier1_candidates[col_change] <= tier1_threshold)
                 df_tier1 = df_tier1_candidates[mask_t1].copy()
-                df_tier1['tier_label'] = "🏢 BLUE CHIP" # Etiqueta para diferenciar
+                df_tier1['tier_label'] = "🏢 BLUE CHIP"
 
-                # --- TIER 2: OPPORTUNITY / RISK (El Resto) ---
-                # Regla: Caída fuerte (según threshold usuario, ej -5%). Limitado a 5.
+                # Tier 2 (Riesgo/ADRs) -> threshold + Limite 4
                 mask_t2 = (df_tier2_candidates[col_change] <= threshold)
                 df_tier2 = df_tier2_candidates[mask_t2].copy()
-                
-                # Nos quedamos solo con las 5 peores caídas
-                df_tier2 = df_tier2.sort_values(by=col_change, ascending=True).head(5)
+                df_tier2 = df_tier2.sort_values(by=col_change, ascending=True).head(4)
                 df_tier2['tier_label'] = "🚀 SPECULATIVE"
 
-                print(f"   📊 {market_type} Tier 1 (Top 30): {len(df_tier1)} detectadas (< {tier1_threshold}%)")
-                print(f"   📊 {market_type} Tier 2 (Risk):   {len(df_tier2)} detectadas (< {threshold}%)")
+                print(f"   📊 {market_type} Tier 1 (Safe): {len(df_tier1)} detectadas (< {tier1_threshold}%)")
+                print(f"   📊 {market_type} Tier 2 (Risk): {len(df_tier2)} detectadas (< {threshold}%)")
 
                 filtered = pd.concat([df_tier1, df_tier2])
+            
             else:
-                # Fallback por si falla el dato de market cap
                 print("⚠️ No se encontró Market Cap, aplicando filtro simple.")
                 if not df.empty:
                     filtered = df[df[col_change] <= threshold].copy()

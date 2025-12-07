@@ -137,21 +137,28 @@ def root():
 # --- ENDPOINTS MANUALES ---
 
 @app.get("/analyze", response_model=List[CoinSignalSchema])
-def analyze_market(threshold: float = -5.0, db: Session = Depends(get_db)):
-    return run_analysis_cycle(db, 'CRYPTO', threshold)
+def analyze_market(
+    threshold: float = -5.0,       # Para las Alts/Riesgo
+    tier1_threshold: float = -2.5, # Para Bitcoin/Top 50 (NUEVO)
+    db: Session = Depends(get_db)
+):
+    return run_analysis_cycle(db, 'CRYPTO', threshold, tier1_threshold)
 
 @app.get("/analyze/stocks", response_model=List[StockSignalSchema])
-def analyze_stocks(threshold: float = -3.0, db: Session = Depends(get_db)):
-    return run_analysis_cycle(db, 'USA', threshold)
+def analyze_stocks(
+    threshold: float = -5.0,       # Para Small Caps
+    tier1_threshold: float = -1.5, # Para Apple/Nvidia (NUEVO)
+    db: Session = Depends(get_db)
+):
+    return run_analysis_cycle(db, 'USA', threshold, tier1_threshold)
 
 @app.get("/analyze/Merval", response_model=List[StockSignalSchema])
-def analyze_merval(threshold: float = -2.0, db: Session = Depends(get_db)):
-    """
-    Escanea ADRs Argentinos en Dólares (YPF, GGAL, MELI, etc.)
-    Usa el motor unificado con el perfil 'MERVAL'.
-    """
-    # Toda la magia ocurre aquí dentro 👇
-    return run_analysis_cycle(db, 'MERVAL', threshold)
+def analyze_merval(
+    threshold: float = -5.0,       # Para Panel General
+    tier1_threshold: float = -2.0, # Para YPF/Galicia (NUEVO)
+    db: Session = Depends(get_db)
+):
+    return run_analysis_cycle(db, 'MERVAL', threshold, tier1_threshold)
 
 # ==========================================
 # --- NUEVOS ENDPOINTS: TRADING & SENTIMENT ---
@@ -438,11 +445,11 @@ def format_detailed_message(title: str, signals: list):
     
     return msg
 
-def run_analysis_cycle(db: Session, market_type: str, threshold: float):
+def run_analysis_cycle(db: Session, market_type: str, threshold: float, tier1_threshold: float): # <--- NUEVO PARAMETRO
     news_intel = NewsIntel()
     
     # 1. Usamos el nuevo Escáner Universal
-    opportunities = analyzer.find_market_opportunities(market_type, threshold)
+    opportunities = analyzer.find_market_opportunities(market_type, threshold, tier1_threshold)
     saved_signals = []
     
     msg_inicio = f"🔎 Iniciando Análisis {market_type} ({len(opportunities)} activos)..."

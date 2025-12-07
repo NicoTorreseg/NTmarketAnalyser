@@ -12,6 +12,8 @@ CMC_BASE_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/lat
 USE_MOCK_DATA = False
 SQLALCHEMY_DATABASE_URL = "sqlite:///./crypto_ops.db"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
 
 
 # CONFIGURACIÓN STOCKS (YAHOO FINANCE)
