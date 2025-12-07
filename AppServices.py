@@ -18,6 +18,7 @@ class NewsIntel:
         self.googlenews = GoogleNews(lang='en', period='1d') # Noticias de últimas 24h
         self.model = genai.GenerativeModel('gemini-2.5-flash')
 
+
     def get_sentiment_analysis(self, symbol: str, asset_name: str = "", is_crypto: bool = True, is_merval: bool = False) -> dict:
         """
         Busca noticias con contexto dinámico de idioma y región.
@@ -279,12 +280,13 @@ class MarketAnalyzer:
     def _process_technicals(self, df_completo):
         """
         Limpia el DataFrame crudo y traduce las velas (0/1) a texto legible.
-        Equivale a tu función 'generar_dataframe_tecnico'
         """
         if df_completo.empty: return pd.DataFrame()
 
-        # Lista 3 (Técnicos) + Contexto
-        columnas_deseadas = TV_RAW_LISTS[2] + ['close', 'change', 'volume', 'description']
+        # --- CAMBIO CRÍTICO AQUÍ ---
+        # Agregamos 'market_cap_basic' para poder hacer el ranking Top 30 después.
+        columnas_deseadas = TV_RAW_LISTS[2] + ['close', 'change', 'volume', 'description', 'market_cap_basic']
+        
         cols_existentes = list(set(c for c in columnas_deseadas if c in df_completo.columns))
         df_tech = df_completo[cols_existentes].copy()
 
@@ -440,81 +442,139 @@ class MarketAnalyzer:
 
     def find_market_opportunities(self, market_type: str, threshold: float) -> List[dict]:
         """
-        Escáner Universal: Sirve para Crypto, USA y Merval.
-        market_type: 'CRYPTO', 'USA', 'MERVAL'
+        Escáner Universal Híbrido V2.
+        - CRYPTO: Top 50 (Rank) vs Resto [INTACTO].
+        - USA/MERVAL: Top 30 (Market Cap) vs Resto [NUEVO].
         """
-        print(f"📡 Escaneando {market_type} (Threshold: {threshold}%)...")
+        print(f"📡 Escaneando {market_type}...")
         
-        # 1. ELEGIR FUENTE DE DATOS
+        filtered = pd.DataFrame()
+        col_change = 'change'     
+        
+        # ==========================================================
+        # 1. ESTRATEGIA CRYPTO (INTACTA - NO TOCAR)
+        # ==========================================================
         if market_type == 'CRYPTO':
+            # Traemos 300 para tener Top 50 + 250 alts para buscar gemas
             df_raw = self.scan_coin_market(limit=300)
             df = self._process_crypto_technicals(df_raw)
-            col_change = 'change' # En tu código crypto ya lo renombraste a 'change'
-            min_vol = 0 # Opcional
-        elif market_type == 'USA':
-            df_raw = self.scan_tradingview(markets=["america"], limit=800)
-            df = self._process_technicals(df_raw)
-            col_change = 'change'
-            min_vol = 50000 # Filtro de volumen para USA
-        elif market_type == 'MERVAL':
-            df_raw = self.scan_tradingview(markets=["argentina"], limit=400)
-            df = self._process_technicals(df_raw)
-            col_change = 'change'
-            min_vol = 0
-
-        if df.empty: return []
-
-        # 2. FILTRADO COMÚN
-        # Filtramos por caída y volumen (si aplica)
-        mask = (df[col_change] <= threshold)
-        if min_vol > 0 and 'volume' in df.columns:
-            mask = mask & (df['volume'] > min_vol)
             
-        filtered = df[mask].copy() # Importante usar .copy() para evitar warnings
+            if not df.empty and 'crypto_total_rank' in df.columns:
+                df['crypto_total_rank'] = pd.to_numeric(df['crypto_total_rank'], errors='coerce').fillna(999)
+                
+                # Tier 1 Crypto
+                THRESHOLD_TIER_1 = -2.5 
+                mask_top50 = (df['crypto_total_rank'] <= 50) & (df['change'] <= THRESHOLD_TIER_1)
+                df_tier1 = df[mask_top50].copy()
+                
+                # Tier 2 Crypto
+                mask_tier2 = (df['crypto_total_rank'] > 50) & (df['change'] <= threshold)
+                df_tier2 = df[mask_tier2].copy()
+                df_tier2 = df_tier2.sort_values(by='change', ascending=True).head(4)
+                
+                print(f"   📊 Crypto Tier 1 (Top 50): {len(df_tier1)} detectadas (Thresh: {THRESHOLD_TIER_1}%)")
+                print(f"   📊 Crypto Tier 2 (Risk):   {len(df_tier2)} detectadas (Thresh: {threshold}%)")
+                
+                filtered = pd.concat([df_tier1, df_tier2])
+            else:
+                filtered = df 
+        
+        # ==========================================================
+        # 2. ESTRATEGIA STOCKS (USA & MERVAL) - LÓGICA TIER 1 vs TIER 2
+        # ==========================================================
+        elif market_type in ['USA', 'MERVAL']:
+            # A. Configuración específica por mercado
+            if market_type == 'USA':
+                df_raw = self.scan_tradingview(markets=["america"], limit=800)
+                min_vol = 50000 
+                tier1_threshold = -1.5 # USA es estable, -1.5% ya es descuento en Apple/Microsoft
+            else: # MERVAL
+                df_raw = self.scan_tradingview(markets=["argentina"], limit=400)
+                min_vol = 0
+                tier1_threshold = -2.0 # Argentina es más volátil, pedimos un poco más de caída
+            
+            df = self._process_technicals(df_raw)
+            col_change = 'change'
 
-    # 🔥 NUEVO: FILTRO ANTI-REPETIDOS 🔥
-    # Si tenemos la columna 'description' (Nombre de la empresa), borramos duplicados.
-    # keep='first' significa que se queda con el primero que aparece y borra los demás.
+            # B. Lógica de Filtrado por Niveles
+            if not df.empty and 'market_cap_basic' in df.columns:
+                # 1. Convertir Market Cap a números y ordenar (Las Gigantes primero)
+                df['market_cap_basic'] = pd.to_numeric(df['market_cap_basic'], errors='coerce').fillna(0)
+                if min_vol > 0 and 'volume' in df.columns:
+                    df = df[df['volume'] > min_vol]
+                
+                # Ordenamos de mayor a menor capitalización
+                df = df.sort_values(by='market_cap_basic', ascending=False)
+
+                # 2. Dividir el universo: Top 30 vs El Resto
+                TOP_N = 30
+                limit_index = min(len(df), TOP_N)
+                
+                df_tier1_candidates = df.iloc[:limit_index] # Las 30 más grandes (YPF, GGAL / AAPL, MSFT)
+                df_tier2_candidates = df.iloc[limit_index:] # Small Caps / Panel General
+
+                # --- TIER 1: BLUE CHIPS (Calidad) ---
+                # Regla: Caída moderada (-1.5% o -2%). Sin límite de cantidad.
+                mask_t1 = (df_tier1_candidates[col_change] <= tier1_threshold)
+                df_tier1 = df_tier1_candidates[mask_t1].copy()
+                df_tier1['tier_label'] = "🏢 BLUE CHIP" # Etiqueta para diferenciar
+
+                # --- TIER 2: OPPORTUNITY / RISK (El Resto) ---
+                # Regla: Caída fuerte (según threshold usuario, ej -5%). Limitado a 5.
+                mask_t2 = (df_tier2_candidates[col_change] <= threshold)
+                df_tier2 = df_tier2_candidates[mask_t2].copy()
+                
+                # Nos quedamos solo con las 5 peores caídas
+                df_tier2 = df_tier2.sort_values(by=col_change, ascending=True).head(5)
+                df_tier2['tier_label'] = "🚀 SPECULATIVE"
+
+                print(f"   📊 {market_type} Tier 1 (Top 30): {len(df_tier1)} detectadas (< {tier1_threshold}%)")
+                print(f"   📊 {market_type} Tier 2 (Risk):   {len(df_tier2)} detectadas (< {threshold}%)")
+
+                filtered = pd.concat([df_tier1, df_tier2])
+            else:
+                # Fallback por si falla el dato de market cap
+                print("⚠️ No se encontró Market Cap, aplicando filtro simple.")
+                if not df.empty:
+                    filtered = df[df[col_change] <= threshold].copy()
+
+        # ==========================================================
+        # 3. PROCESAMIENTO COMÚN Y SALIDA
+        # ==========================================================
+        if filtered.empty: return []
+
+        # Deduplicación de nombres (Anti-Spam de acciones con Tickers repetidos o ADRs sucios)
         if 'description' in filtered.columns:
-            # 1. Función lambda para limpiar "basura" financiera
             def clean_name(text):
                 if not isinstance(text, str): return str(text)
                 text = text.upper()
-                # Lista de palabras 'ruido' que hacen que los nombres parezcan distintos
-                noise_words = [
-                    " CEDEAR", " ADR", " S.A.", " SA", " INC.", " INC", " CORP", " LTD", 
-                    " PLC", " AG", " SHS", " CERT DEPOSITO", " ARG REPR", " SP ADR"
-                ]
-                for word in noise_words:
-                    text = text.replace(word, "")
-                # Truco extra: Quedarse solo con las primeras 2 palabras suele bastar
-                # para diferenciar "Coca Cola" de "Banco Galicia"
+                noise_words = [" CEDEAR", " ADR", " S.A.", " SA", " INC.", " CORP", " LTD", " SHS", " CL A"]
+                for word in noise_words: text = text.replace(word, "")
                 return " ".join(text.split()[:2])
 
-            # 2. Creamos columna temporal 'clean_id'
             filtered['clean_id'] = filtered['description'].apply(clean_name)
-            
-            len_antes = len(filtered)
-            # 3. Borramos duplicados basándonos en el nombre LIMPIO
             filtered = filtered.drop_duplicates(subset=['clean_id'], keep='first')
-            
-            print(f"   ✂️ Deduplicación Agresiva: {len_antes} -> {len(filtered)} (Se borraron {len_antes - len(filtered)} repetidos).")
 
         opportunities = []
 
-        # 3. UNIFICACIÓN DE FORMATO
         for _, row in filtered.iterrows():
-            # Lógica de RSI y Velas (Idéntica para todos)
             rsi = row.get('RSI', 50)
             patron = row.get('Patrones_Hoy')
+            tier = row.get('tier_label', '') # Recuperamos si es Blue Chip o Speculative
             
             tech_msg = []
+            # Agregamos la etiqueta al mensaje técnico visualmente
+            if market_type == 'CRYPTO':
+                 rank = row.get('crypto_total_rank', 999)
+                 tech_msg.append("🏆 TOP 50" if rank <= 50 else "⚡ GEM/RISK")
+            elif tier:
+                 tech_msg.append(tier)
+            
             if patron: tech_msg.append(f"🕯️ {patron}")
             if rsi < 30: tech_msg.append(f"💎 Oversold ({round(rsi)})")
             
             signal_reason = " | ".join(tech_msg) if tech_msg else "Dip detected"
             
-            # Detectar nombre y símbolo según el mercado
             symbol = row.get('base_currency', row.get('name'))
             name = row.get('base_currency_desc', row.get('description', symbol))
 
@@ -522,15 +582,13 @@ class MarketAnalyzer:
                 "symbol": symbol,
                 "name": name,
                 "price": float(row['close']),
-                "percent_change": float(row[col_change]), # Unificamos nombre del campo
+                "percent_change": float(row[col_change]),
                 "rsi": float(rsi) if pd.notna(rsi) else 50,
                 "technical_signal": signal_reason,
-                # Datos vacíos de IA para llenar después
                 "ai_score": None, "ai_decision": None, "ai_reason": None
             })
 
-        opportunities.sort(key=lambda x: x['percent_change'])
-        return opportunities[:20]
+        return opportunities
     
 
     

@@ -1,5 +1,6 @@
 # main.py
 import uvicorn
+import time  # <--- AGREGA ESTO
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
@@ -448,9 +449,18 @@ def run_analysis_cycle(db: Session, market_type: str, threshold: float):
     print(msg_inicio)
     Notifier.send_telegram_alert(msg_inicio)
 
+    count = 0
+
     for op in opportunities:
         # 2. Análisis IA (Lógica Unificada)
         # Determinamos si es crypto o merval para el contexto de la noticia
+
+        if count > 0:
+            print("⏳ Esperando 5s para respetar cuota de IA...")
+            time.sleep(5) 
+        
+        count += 1
+
         is_crypto = (market_type == 'CRYPTO')
         is_merval = (market_type == 'MERVAL')
         
@@ -462,7 +472,8 @@ def run_analysis_cycle(db: Session, market_type: str, threshold: float):
                 is_merval=is_merval
             )
         except:
-            ai_analysis = {"score": 50, "decision": "NEUTRAL", "reason": "Error IA"}
+            # Si falla (incluso por cuota), guardamos error para no romper el bucle
+            ai_analysis = {"score": 50, "decision": "ERROR", "reason": "Fallo en IA o Cuota Excedida"}
 
         # 3. Guardado Polimórfico (Aquí el único IF necesario)
         if market_type == 'CRYPTO':
@@ -494,7 +505,7 @@ def run_analysis_cycle(db: Session, market_type: str, threshold: float):
     return saved_signals
 # --- ARRANQUE DEL SERVIDOR ---
 if __name__ == "__main__":
-    hostsv="0.0.0.0" #local es "127.0.0.1"
+    hostsv="127.0.0.1" #local es "127.0.0.1"
     print("--- Iniciando servidor modular ---")
     print(f"Documentación disponible en: http://{hostsv}:8000/docs")
     print(f"Cliente: http://192.168.0.50:8000/docs")
