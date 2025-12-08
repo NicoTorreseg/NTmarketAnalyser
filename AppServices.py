@@ -205,7 +205,7 @@ class MarketAnalyzer:
                 data = r.json()
                 if data['data']:
                     price = data['data'][0]['d'][0]
-                    # print(f"   ✅ TV Stock ({symbol}): ${price}")
+                    print(f"   ✅ TV Stock ({symbol}): ${price}")
                     return float(price)
         except Exception:
             pass
@@ -216,7 +216,7 @@ class MarketAnalyzer:
         try:
             url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
             params = {'symbol': symbol, 'convert': 'USD'}
-            r = requests.get(url, headers=self.cmc_headers, params=params, timeout=5)
+            r = requests.get(url, headers=self.cmc_headers, params=params, timeout=7)
             if r.status_code == 200:
                 data = r.json()
                 # CMC puede devolver varios para el mismo símbolo, tomamos el primero (mayor rank)
@@ -228,10 +228,10 @@ class MarketAnalyzer:
                     else:
                         price = crypto_data['quote']['USD']['price']
                     
-                    # print(f"   ✅ CMC Crypto ({symbol}): ${price}")
+                    print(f"   ✅ CMC Crypto ({symbol}): ${price}")
                     return float(price)
         except Exception as e:
-            # print(f"   ⚠️ CMC Error ({symbol}): {e}")
+            print(f"   ⚠️ CMC Error ({symbol}): {e}")
             pass
         return 0.0
 
@@ -241,6 +241,8 @@ class MarketAnalyzer:
             url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.upper()}USDT"
             r = requests.get(url, timeout=3)
             if r.status_code == 200:
+                price = r.json()['price']
+                print(f"   ✅ Binance Crypto ({symbol}): ${price}")
                 return float(r.json()['price'])
         except: pass
         return 0.0
@@ -257,6 +259,10 @@ class MarketAnalyzer:
         try:
             r = requests.post(TV_COIN_URL, headers=TV_HEADERS, cookies=TV_COOKIES, json=payload, timeout=5)
             if r.status_code == 200 and r.json()['data']:
+
+                price = r.json()['price']
+                print(f"   ✅ TradingView Crypto ({symbol}): ${price}")
+
                 return float(r.json()['data'][0]['d'][0])
         except: pass
         return 0.0
@@ -476,7 +482,7 @@ class MarketAnalyzer:
             # print(f"🔎 Buscando {symbol} en STOCKS USA...")
             price = self._fetch_tv_price_stock(symbol, ["america"])
             if price > 0: return price
-            
+            print(f"🔎 Buscando {symbol} en STOCKS USA...")
             # Backup Yahoo
             try: return yf.Ticker(symbol).fast_info.last_price or 0.0
             except: pass
