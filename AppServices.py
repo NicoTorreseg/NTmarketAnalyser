@@ -256,8 +256,16 @@ class MarketAnalyzer:
             "markets": ["coin"],
             "range": [0, 1]
         }
+
+
         try:
             r = requests.post(TV_COIN_URL, headers=TV_HEADERS, cookies=TV_COOKIES, json=payload, timeout=5)
+            if r.status_code == 403:
+                msg = "⚠️ **ALERTA CRÍTICA** ⚠️\nLas Cookies de TradingView han expirado (Error 403).\nPor favor actualiza `config.py` inmediatamente."
+                print(f"❌ {msg}")
+                Notifier.send_telegram_alert(msg)
+                return pd.DataFrame()
+            
             if r.status_code == 200 and r.json()['data']:
 
                 price = r.json()['price']
@@ -467,15 +475,29 @@ class MarketAnalyzer:
         
         # 1. DETECCIÓN: ¿ES MERVAL?
         if symbol in all_merval or symbol.endswith(".BA"):
-            # print(f"🔎 Buscando {symbol} en MERVAL...")
-            price = self._fetch_tv_price_stock(symbol, ["argentina"])
-            if price > 0: return price
+            price_ars = 0.0
             
-            # Backup Yahoo Finance
-            try:
-                yf_sym = f"{symbol}.BA" if not symbol.endswith(".BA") and "." not in symbol else symbol
-                return yf.Ticker(yf_sym).fast_info.last_price or 0.0
-            except: pass
+            # Intentamos TradingView
+            price_ars = self._fetch_tv_price_stock(symbol, ["argentina"])
+            
+            # Si falla, Backup Yahoo Finance
+            if price_ars == 0:
+                try:
+                    yf_sym = f"{symbol}.BA" if not symbol.endswith(".BA") and "." not in symbol else symbol
+                    price_ars = yf.Ticker(yf_sym).fast_info.last_price or 0.0
+                except: pass
+
+            # --- CONVERSIÓN OBLIGATORIA A USD ---
+            if price_ars > 0:
+                ccl = self.get_dolar_ccl() # Usamos tu método existente
+                if ccl > 0:
+                    price_usd = price_ars / ccl
+                    print(f"💱 Conversión {symbol}: ${price_ars} ARS / {ccl} = ${price_usd:.2f} USD")
+                    return price_usd
+                else:
+                    return price_ars # Fallback si no hay ccl (raro)
+            
+            return 0.0
 
         # 2. DETECCIÓN: ¿ES STOCK USA? (Solo los de tu Watchlist explícita)
         elif symbol in WATCHLIST_STOCKS:
@@ -599,7 +621,7 @@ class MarketAnalyzer:
         
         filtered = pd.DataFrame()
         col_change = 'change'     
-        
+        conversion_rate = 1.0
         # ==========================================================
         # 1. ESTRATEGIA CRYPTO (INTACTA - NO TOCAR)
         # ==========================================================
@@ -639,12 +661,23 @@ class MarketAnalyzer:
             else: # MERVAL
                 df_raw = self.scan_tradingview(markets=["argentina"], limit=600)
                 min_vol = 0
+                
             
+            if market_type == 'MERVAL':
+                ccl = self.get_dolar_ccl() # Usamos tu nuevo método
+                conversion_rate = 1 / ccl if ccl > 0 else 0
+                print(f"🔄 Aplicando conversión Merval: Divisor {ccl}")
+            # ----------------------------------
+
             df = self._process_technicals(df_raw)
             col_change = 'change'
 
             # 🔥🔥 1. FILTRO DE LIMPIEZA INICIAL (Whitelisting) 🔥🔥
+
+            
             if market_type == 'MERVAL' and not df.empty and 'description' in df.columns:
+
+
                 cedear_keywords = 'CEDEAR|CERT DEP|ARG REPR|CERTIFICADO|DEPOSITO'
                 es_cedear = df['description'].str.contains(cedear_keywords, case=False, regex=True)
                 
@@ -767,7 +800,7 @@ class MarketAnalyzer:
             opportunities.append({
                 "symbol": symbol,
                 "name": name,
-                "price": float(row['close']),
+                "price": float(row['close']) * conversion_rate,
                 "percent_change": float(row[col_change]),
                 "rsi": float(rsi) if pd.notna(rsi) else 50,
                 "technical_signal": signal_reason,
@@ -831,6 +864,21 @@ class MarketAnalyzer:
     #     opportunities.sort(key=lambda x: x['percent_change'])
     #     return opportunities
     
+    def get_dolar_ccl(self) -> float:
+        """Obtiene la cotización del Dólar CCL (o Blue) para convertir pesos."""
+        try:
+            # DolarApi.com es gratuita y muy usada en Arg
+            r = requests.get("https://dolarapi.com/v1/dolares/contadoconliqui", timeout=3)
+            if r.status_code == 200:
+                data = r.json()
+                price = float(data['venta']) # Usamos punta vendedora
+                print(f"💵 Dólar CCL detectado: ${price}")
+                return price
+        except Exception as e:
+            print(f"⚠️ Error obteniendo Dólar CCL: {e}")
+        
+        return 1200.0 # Fallback de emergencia (Actualizar según economía real)
+
     def _get_mock_data(self):
         """Datos falsos para pruebas."""
         return [
