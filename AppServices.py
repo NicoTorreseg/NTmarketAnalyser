@@ -376,12 +376,19 @@ class MarketAnalyzer:
         url = 'https://scanner.tradingview.com/global/scan'
         target_markets = markets if markets else ["america", "argentina", "brazil", "mexico"]
         
+        if "argentina" in target_markets:
+            sort_criteria = "volume"
+            min_volume = 1000  # Filtro extra: Si no mueve al menos 1000 nominales, ni me lo traigas
+        else:
+            sort_criteria = "market_cap_basic"
+            min_volume = 0
+
         payload = {
             "columns": TV_COLUMNS,
             "ignore_unknown_fields": False,
             "options": {"lang": "es"},
             "range": [0, limit],
-            "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
+            "sort": {"sortBy": sort_criteria, "sortOrder": "desc"}, # <--- AQUÍ ESTÁ LA MAGIA
             "symbols": {},
             "markets": target_markets,
             "filter2": {
@@ -397,6 +404,8 @@ class MarketAnalyzer:
                             ]
                         }
                     },
+                    # FILTRO EXTRA: Excluir activos sin liquidez (elimina basura muerta)
+                    {"expression": {"left": "volume", "operation": "greater", "right": min_volume}},
                     {"expression": {"left": "typespecs", "operation": "has_none_of", "right": ["pre-ipo"]}}
                 ]
             }
@@ -467,7 +476,10 @@ class MarketAnalyzer:
             "BBAR", "BBARB", "COME", "MOLI", "LEDE", "SEMI", "MORI", "MOLA", "SAMI", "AGRO",
             "INVJ", "GCLA", "GAMI", "GCDI", "CTIO", "GARO", "FERR", "RIGO", "LONG", "DOME", 
             "RICH", "ROSE", "CELU", "CGPA2", "DGCE", "ECOG", "GBAN", "METR", "METRC", "HARG", 
-            "HSAT", "IEB", "A3", "VIST", "MELI", "GLOB", "ELP", "PBR", "TEN", "DESP", "BIOX"
+            "HSAT", "IEB", "A3", "VIST", "MELI", "GLOB", "ELP", "PBR", "TEN", "DESP", "BIOX",
+
+            # AGREGADOS FALTANTES (CEDEARS Y GENERAL)
+            "HOOD", "INTR", "POLL", "URA", "BOLT", "OEST", "AUSO", "DGCU2", "CAPX"
         ]
         
         # Unimos con la watchlist de config por si acaso
@@ -676,7 +688,34 @@ class MarketAnalyzer:
 
             
             if market_type == 'MERVAL' and not df.empty and 'description' in df.columns:
+                
+                # A. Función para detectar si es una variante "sucia" (D, C, Warrant)
+                def es_variante_sucia(symbol):
+                    sym = symbol.upper()
+                    # 1. Warrants (CRE3W)
+                    if 'W' in sym or 'WARRANT' in row.get('description', '').upper(): return True
+                    # 2. Bonos / Obligaciones (terminan en O, D, C y tienen numeros raros)
+                    if len(sym) > 5 and any(c.isdigit() for c in sym): return True
+                    # 3. Variantes de Liquidación (Terminan en D, DD, C, pero no son tickers válidos como EDN)
+                    # Lista de tickers validos que TERMINAN en D o C (Excepciones)
+                    valid_ends = ["YPFD", "PAMP", "TGSU2", "TECO2", "CEPU"] 
+                    
+                    if sym not in valid_ends:
+                        if sym.endswith("D") or sym.endswith("DD") or sym.endswith("C") or sym.endswith("B"):
+                            # Si termina en D pero la raíz existe en el DF (ej: existe PAMP y PAMPD), es sucia.
+                            root = sym.rstrip("DCB")
+                            if root in df['name'].values: return True
+                            
+                    return False
 
+                # B. Aplicamos el filtro fila por fila
+                indices_sucios = []
+                for idx, row in df.iterrows():
+                    if es_variante_sucia(row['name']):
+                        indices_sucios.append(idx)
+                
+                df = df.drop(indices_sucios)
+                print(f"   🧹 Limpieza Merval: Se eliminaron {len(indices_sucios)} variantes sucias.")
 
                 cedear_keywords = 'CEDEAR|CERT DEP|ARG REPR|CERTIFICADO|DEPOSITO'
                 es_cedear = df['description'].str.contains(cedear_keywords, case=False, regex=True)
