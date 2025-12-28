@@ -689,59 +689,71 @@ class MarketAnalyzer:
             
             if market_type == 'MERVAL' and not df.empty and 'description' in df.columns:
                 
-                # A. Función para detectar si es una variante "sucia" (D, C, Warrant)
-                def es_variante_sucia(symbol):
-                    sym = symbol.upper()
-                    # 1. Warrants (CRE3W)
-                    if 'W' in sym or 'WARRANT' in row.get('description', '').upper(): return True
-                    # 2. Bonos / Obligaciones (terminan en O, D, C y tienen numeros raros)
-                    if len(sym) > 5 and any(c.isdigit() for c in sym): return True
-                    # 3. Variantes de Liquidación (Terminan en D, DD, C, pero no son tickers válidos como EDN)
-                    # Lista de tickers validos que TERMINAN en D o C (Excepciones)
-                    valid_ends = ["YPFD", "PAMP", "TGSU2", "TECO2", "CEPU"] 
+                # 1. FILTRO DE VOLUMEN (CRÍTICO)
+                # La basura del Merval (Rights, acciones viejas) no mueve volumen.
+                # Exigimos que haya movido al menos 1 millón de pesos (o nominales equivalentes)
+                # Ajusta este 10000 según necesites, pero > 0 es obligatorio.
+                df = df[df['volume'] > 5000].copy() 
+
+                # 2. DEFINICIÓN DE BASURA (Mejorada)
+                def es_variante_sucia(row):
+                    sym = row['name'].upper()
+                    desc = str(row.get('description', '')).upper()
                     
-                    if sym not in valid_ends:
-                        if sym.endswith("D") or sym.endswith("DD") or sym.endswith("C") or sym.endswith("B"):
-                            # Si termina en D pero la raíz existe en el DF (ej: existe PAMP y PAMPD), es sucia.
-                            root = sym.rstrip("DCB")
-                            if root in df['name'].values: return True
-                            
+                    # A. Tickers raros (Warrants, Bonos, Opciones)
+                    if 'W' in sym or len(sym) > 5: return True
+                    
+                    # B. Palabras prohibidas en la descripción
+                    keywords_basura = [
+                        "RIGHTS", "DERECHOS", "WARRANT", "OBLIGACIONES", 
+                        "CLASS B", "CLASS C", "CLASS D", "CLASE B", 
+                        "VOTE", "EXT UNTIL", "FOR SHARES", "BONO", "LETRAS"
+                    ]
+                    if any(bad_word in desc for bad_word in keywords_basura):
+                        return True
+
+                    # C. Exclusiones específicas que se te colaron en el log
+                    blacklist = ["MORI", "LONG", "GBAN"] # Si quieres matar la raíz
+                    # Nota: MORI es la buena, MORIX o descripciones largas son las malas.
+                    # El filtro por descripción arriba ya debería matar a "Morixe Rights..."
+                    
                     return False
 
-                # B. Aplicamos el filtro fila por fila
+                # 3. APLICAR FILTRO FILA POR FILA
                 indices_sucios = []
                 for idx, row in df.iterrows():
-                    if es_variante_sucia(row['name']):
+                    if es_variante_sucia(row):
                         indices_sucios.append(idx)
                 
                 df = df.drop(indices_sucios)
                 print(f"   🧹 Limpieza Merval: Se eliminaron {len(indices_sucios)} variantes sucias.")
 
-                cedear_keywords = 'CEDEAR|CERT DEP|ARG REPR|CERTIFICADO|DEPOSITO'
-                es_cedear = df['description'].str.contains(cedear_keywords, case=False, regex=True)
+                # 4. FILTRO DE CEDEARS (Refinado)
+                # A veces RKLB (Rocket Lab) se cuela. Aseguramos que solo pasen ARGENTINAS PURAS.
+                # Lista blanca estricta de las que SÍ queremos (Líderes + Panel General Bueno)
                 
-                # LISTA COMPLETA DE ACCIONES ARGENTINAS PURAS + VIPS
-                whitelist = [
-                    # --- TOP TIER & SEGUNDA LÍNEA (Líderes) ---
-                    "YPFD", "GGAL", "PAMP",
-                    "BMA", "BBAR", "TXAR", "ALUA", "CEPU", "TGSU2", "LOMA", "MIRG", "BHIP",
-                    "BBAR", "BBARB", "COME","MOLI", "LEDE", "SEMI", "MORI" 
-                    
-                    # --- PANEL GENERAL (Agro, Industria, Gas, Pequeñas) ---
-                    "TECO2", "CRES", "EDN", "TRAN", "TGNO4", 
-                    "SUPV", "BYMA", "VALO", "LOMA", "COME", "GLOB",
-                    "HARG", "HSAT", "IRCP", "IRSA", "JMIN", "LEAL", "MADX", "MAXI", "NAHU", 
-                    
-                    # --- VIPS / REGIONALES (Cedears permitidos) ---
-                    "VIST", "MELI", "GLOB", "ELP"
+                whitelist_pura = [
+                    "YPFD", "GGAL", "PAMP", "BMA", "BBAR", "TXAR", "ALUA", "CEPU", "TGSU2", 
+                    "TGNO4", "EDN", "TRAN", "LOMA", "MIRG", "COME", "MOLI", "LEDE", "SEMI", 
+                    "MORI", "VALO", "BYMA", "CVH", "SUPV", "CRES", "TECO2", "IRSA",
+                    "GCLA", "BOLT", "AGRO", "GAMI", "RICH", "SAMI", "HAVA", "AUSO", "HARG",
+                    # Agrega aquí las que realmente te interesen del Panel General
                 ]
                 
-                es_permitido = df['name'].isin(whitelist)
+                # LÓGICA FINAL:
+                # O está en tu lista VIP (whitelist_pura)
+                # O NO es Cedear Y NO contiene "ETF" Y NO contiene "Class"
                 
-                # Nos quedamos con: (NO es Cedear) O (Está en la Whitelist)
-                mask_final = (~es_cedear) | (es_permitido)
+                cedear_keywords = 'CEDEAR|CERT DEP|ARG REPR|CERTIFICADO|DEPOSITO|ETF|SHS'
+                es_cedear = df['description'].str.contains(cedear_keywords, case=False, regex=True)
+                es_vip = df['name'].isin(whitelist_pura)
+                
+                # Nos quedamos con: (Es VIP) O (No es Cedear/ETF)
+                # Esto da prioridad a tu lista y filtra todo lo extranjero
+                mask_final = (es_vip) | (~es_cedear)
+                
                 df = df[mask_final].copy()
-                print(f"   🇦🇷 Filtro Merval: Quedan {len(df)} activos (Locales + VIPs).")
+                print(f"   🇦🇷 Filtro Merval Final: Quedan {len(df)} activos operables.")
 
             # 🔥🔥 2. DIVISIÓN DE TIERS Y FILTRADO DE PRECIO 🔥🔥
             if not df.empty and 'market_cap_basic' in df.columns:
