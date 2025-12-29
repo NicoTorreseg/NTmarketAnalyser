@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text
 from datetime import datetime
 from database import Base
 
@@ -45,10 +45,15 @@ class Trade(Base):
     entry_price = Column(Float)
     quantity = Column(Float)
     invested_amount = Column(Float)
-    status = Column(String, default="OPEN")
+    status = Column(String, default="OPEN") # OPEN / CLOSED
     bought_at = Column(DateTime, default=datetime.utcnow)
     
+    # Datos de Salida
     exit_price = Column(Float, nullable=True)
-    sell_reason = Column(String, nullable=True)
+    sell_reason = Column(String, nullable=True) # TAKE_PROFIT, STOP_LOSS, MANUAL
     closed_at = Column(DateTime, nullable=True)
     realized_pnl = Column(Float, nullable=True)
+    
+    # --- CAMPO CLAVE PARA MACHINE LEARNING ---
+    # Aquí guardaremos un JSON string con: {rsi: 30, ai_score: 90, etc.}
+    analysis_snapshot = Column(Text, nullable=True)

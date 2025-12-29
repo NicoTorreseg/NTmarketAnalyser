@@ -12,6 +12,7 @@ from database import engine, get_db, Base, SessionLocal, smart_migration
 from modelsTables import CryptoSignal, StockSignal, Trade
 from FieldsJSON import CoinSignalSchema, StockSignalSchema, TradeCreateSchema, PortfolioItemSchema
 from AppServices import MarketAnalyzer, Notifier, NewsIntel
+from BotServices import TradingBot # <--- NUEVO IMPORT
 from config import SCHEDULE_HOURS
 
 from fastapi import FastAPI, Depends, HTTPException, Request # <--- Agrega Request
@@ -22,17 +23,51 @@ from datetime import timedelta # <--- Para filtrar por fecha
 # --- LIFESPAN (Igual que antes) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("--- 🚀 Iniciando Sistema ---")
+    print("--- 🚀 Iniciando Sistema NT Market Bot ---")
     smart_migration(Base.metadata)
     Base.metadata.create_all(bind=engine)
     
     scheduler = BackgroundScheduler()
-    for hour in SCHEDULE_HOURS:
-        scheduler.add_job(auto_check_market, 'cron', hour=hour, minute=0)
+    
+    # 1. Reporte General (Existente) - 9, 13, 22hs
+    # scheduler.add_job(auto_check_market, 'cron', hour=...) # Puedes mantenerlo si quieres reportes
+    
+    # 2. 🛡️ EL GUARDIÁN: Cada 20 minutos (24/7)
+    scheduler.add_job(job_guardian_auto, 'interval', minutes=20, id='guardian_job')
+    
+    # 3. 🏹 EL CAZADOR: Cada 4 horas
+    scheduler.add_job(job_hunter_usa_auto, 'interval', hours=4, id='hunter_job_usa')
+    
     scheduler.start()
+    print("✅ Scheduler Activo: Guardián (20m) & Cazador USA (4h)")
+    
     yield
     scheduler.shutdown()
 
+
+def job_guardian_auto():
+    """Ejecuta vigilancia de portafolio."""
+    db = SessionLocal()
+    try:
+        bot = TradingBot(db)
+        bot.run_guardian_cycle()
+    except Exception as e:
+        print(f"❌ Error Guardián: {e}")
+    finally:
+        db.close()
+
+def job_hunter_usa_auto():
+    """Ejecuta cacería en Stocks USA."""
+    db = SessionLocal()
+    try:
+        bot = TradingBot(db)
+        bot.run_hunter_cycle(market_type='USA')
+    except Exception as e:
+        print(f"❌ Error Cazador USA: {e}")
+    finally:
+        db.close()
+
+        
 def auto_check_market():
     """
     Escaneo Inteligente (Técnico + Fundamental/IA).
@@ -44,13 +79,14 @@ def auto_check_market():
     db = SessionLocal()
     
     try:
-        # --- A. ANÁLISIS TÉCNICO ---
-        crypto_dips = analyzer.find_dip_opportunities(threshold=-5.0)
-        stock_dips = analyzer.find_stock_dips(threshold=-3.0)
-        merval_dips = analyzer.find_merval_dips(threshold=-2.0)
+        # --- A. ANÁLISIS TÉCNICO (CORREGIDO) ---
+        # Usamos find_market_opportunities para todo
+        crypto_dips = analyzer.find_market_opportunities('CRYPTO', threshold=-5.0, tier1_threshold=-2.5)
+        stock_dips = analyzer.find_market_opportunities('USA', threshold=-3.0, tier1_threshold=-1.5)
+        merval_dips = analyzer.find_market_opportunities('MERVAL', threshold=-2.0, tier1_threshold=-1.5)
         
         valid_cryptos = []
-        valid_stocks = [] # Preparado para stocks también
+        valid_stocks = [] 
 
         # --- B. CRIPTO IA ---
         if crypto_dips:
@@ -66,46 +102,33 @@ def auto_check_market():
 
                 print(f"   🤖 {op['symbol']}: {decision}")
 
-                # FILTRO AUTOMÁTICO: Solo guardamos BUY o NEUTRAL (Ignoramos WAIT para no hacer spam)
                 if decision in ["BUY", "NEUTRAL"]:
                     valid_cryptos.append(op)
                     
-                    # Guardar en DB
                     db_signal = CryptoSignal(
                         symbol=op['symbol'], name=op['name'], 
-                        price=op['price'], percent_change_24h=op['percent_change_24h'],
+                        price=op['price'], percent_change_24h=op['percent_change'], # Unificado
                         rsi=op['rsi'], ai_score=op['ai_score'],
                         ai_decision=decision, ai_reason=op['ai_reason']
                     )
                     db.add(db_signal)
 
-        # --- C. STOCKS (Técnico por ahora, o IA simple) ---
-        if stock_dips:
-             for op in stock_dips:
-                # Opcional: Agregar IA para stocks en auto aquí si quieres
-                db_stock = StockSignal(
-                    symbol=op['symbol'], price=op['price'], 
-                    percent_change=op['percent_change'], rsi=op['rsi']
-                )
-                db.add(db_stock)
-                # Convertimos a formato compatible para el reporte
-                op['ai_decision'] = "TECNICO" 
-                op['ai_score'] = 50
-                op['ai_reason'] = "Detección automática por precio (Sin IA completa)"
-                valid_stocks.append(op)
-                
-        if merval_dips:
-             for op in merval_dips:
-                # Lógica de guardado igual a stocks
+        # --- C. STOCKS & MERVAL (Técnico por ahora, o IA simple) ---
+        # Combinamos Stock y Merval en un solo bucle de guardado para no repetir código
+        all_stocks = stock_dips + merval_dips
+        
+        if all_stocks:
+             for op in all_stocks:
                 db_stock = StockSignal(
                     symbol=op['symbol'], price=op['price'], 
                     percent_change=op['percent_change'], rsi=op['rsi'],
-                    ai_decision="TECNICO", ai_score=50, ai_reason="Auto Merval"
+                    ai_decision="TECNICO", ai_score=50, ai_reason="Detección automática (Sin IA completa)"
                 )
                 db.add(db_stock)
-                op['ai_decision'] = "TECNICO"
-                valid_stocks.append(op) # Lo agregamos a la lista para notificar junto con los otros stocks
-        
+                
+                # Convertimos a formato reporte
+                op['ai_decision'] = "TECNICO" 
+                valid_stocks.append(op)
 
         db.commit()
 
@@ -115,7 +138,7 @@ def auto_check_market():
             Notifier.send_telegram_alert(msg)
             
         if valid_stocks:
-            msg = format_detailed_message("REPORTE AUTO STOCKS", valid_stocks)
+            msg = format_detailed_message("REPORTE AUTO STOCKS/MERVAL", valid_stocks)
             Notifier.send_telegram_alert(msg)
             
         if not valid_cryptos and not valid_stocks:
@@ -411,6 +434,20 @@ def view_history_web(request: Request, db: Session = Depends(get_db)):
         "trades": closed_trades,
         "total_pnl": total_pnl
     })
+
+@app.get("/bot/force-hunt-usa")
+def force_hunt_usa(db: Session = Depends(get_db)):
+    """Fuerza al bot a cazar acciones de USA AHORA."""
+    bot = TradingBot(db)
+    bot.run_hunter_cycle('USA')
+    return {"status": "Cacería USA finalizada. Revisa la consola."}
+
+@app.get("/bot/force-guard")
+def force_guard(db: Session = Depends(get_db)):
+    """Fuerza al guardián a revisar posiciones AHORA."""
+    bot = TradingBot(db)
+    bot.run_guardian_cycle()
+    return {"status": "Guardia finalizada. Revisa la consola."}
 
 # --- HELPER: CONSTRUCTOR DE MENSAJES DETALLADOS ---
 def format_detailed_message(title: str, signals: list):

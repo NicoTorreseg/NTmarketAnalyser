@@ -115,3 +115,19 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Horarios de ejecución automática (formato 24hs)
 SCHEDULE_HOURS = [9, 13, 22]
+
+
+# --- 🤖 CONFIGURACIÓN DEL TRADING BOT ---
+BOT_ACTIVE = True               # Interruptor General
+PAPER_BALANCE_INITIAL = 10000   # Capital Virtual (USD)
+TRADE_AMOUNT_USD = 500          # Cuánto invertir por operación
+MAX_OPEN_POSITIONS = 5          # Máximo de operaciones simultáneas
+
+# Reglas del Guardián (Ventas)
+TAKE_PROFIT_PCT = 4.0           # Vender si gana +4%
+STOP_LOSS_PCT = -2.5            # Vender si pierde -2.5%
+
+# Reglas del Cazador (Compras)
+MIN_AI_SCORE = 60               # <--- CAMBIO AQUÍ (Antes 80)
+STRICT_BUY_DECISION = True      # Solo aceptar "BUY"
+

@@ -461,15 +461,16 @@ class MarketAnalyzer:
 
     def get_current_price(self, symbol: str) -> float:
         """
-        Lógica de Prioridades:
-        1. Si es MERVAL (Lista) -> TradingView ARG -> Yahoo.
-        2. Si es STOCK USA (Lista) -> TradingView USA -> Yahoo.
-        3. TODO LO DEMÁS -> Asumimos CRYPTO -> CoinMarketCap -> Binance -> TV Crypto.
+        Lógica de Prioridades INTELIGENTE V2:
+        1. MERVAL (Argentina)
+        2. STOCKS USA (Lista VIP)
+        3. CRYPTO (Intentamos fuentes cripto)
+        4. FALLBACK GENÉRICO (Si todo falla, probamos Yahoo Finance como Stock)
         """
         symbol = symbol.upper()
         
         # --- Listas de Identificación ---
-        # Ampliamos la detección de Merval con la lista que pasaste antes
+        # (Mantén tu lista merval_tickers larga aquí como la tenías)
         merval_tickers = [
             "YPFD", "GGAL", "BMA", "PAMP", "TECO2", "TXAR", "ALUA", "CRES", "TGSU2", "TGNO4",
             "EDN", "TRAN", "CEPU", "SUPV", "BYMA", "VALO", "CVH", "LOMA", "MIRG", "BHIP",
@@ -477,121 +478,58 @@ class MarketAnalyzer:
             "INVJ", "GCLA", "GAMI", "GCDI", "CTIO", "GARO", "FERR", "RIGO", "LONG", "DOME", 
             "RICH", "ROSE", "CELU", "CGPA2", "DGCE", "ECOG", "GBAN", "METR", "METRC", "HARG", 
             "HSAT", "IEB", "A3", "VIST", "MELI", "GLOB", "ELP", "PBR", "TEN", "DESP", "BIOX",
-
-            # AGREGADOS FALTANTES (CEDEARS Y GENERAL)
             "HOOD", "INTR", "POLL", "URA", "BOLT", "OEST", "AUSO", "DGCU2", "CAPX"
         ]
         
-        # Unimos con la watchlist de config por si acaso
         all_merval = set(merval_tickers + WATCHLIST_MERVAL)
         
         # 1. DETECCIÓN: ¿ES MERVAL?
         if symbol in all_merval or symbol.endswith(".BA"):
             price_ars = 0.0
-            
-            # Intentamos TradingView
             price_ars = self._fetch_tv_price_stock(symbol, ["argentina"])
             
-            # Si falla, Backup Yahoo Finance
             if price_ars == 0:
                 try:
                     yf_sym = f"{symbol}.BA" if not symbol.endswith(".BA") and "." not in symbol else symbol
                     price_ars = yf.Ticker(yf_sym).fast_info.last_price or 0.0
                 except: pass
 
-            # --- CONVERSIÓN OBLIGATORIA A USD ---
             if price_ars > 0:
-                ccl = self.get_dolar_ccl() # Usamos tu método existente
+                ccl = self.get_dolar_ccl()
                 if ccl > 0:
-                    price_usd = price_ars / ccl
-                    print(f"💱 Conversión {symbol}: ${price_ars} ARS / {ccl} = ${price_usd:.2f} USD")
-                    return price_usd
-                else:
-                    return price_ars # Fallback si no hay ccl (raro)
-            
+                    return price_ars / ccl
+                return price_ars
             return 0.0
 
-        # 2. DETECCIÓN: ¿ES STOCK USA? (Solo los de tu Watchlist explícita)
+        # 2. DETECCIÓN: ¿ES STOCK USA (Lista VIP)?
         elif symbol in WATCHLIST_STOCKS:
-            # print(f"🔎 Buscando {symbol} en STOCKS USA...")
             price = self._fetch_tv_price_stock(symbol, ["america"])
             if price > 0: return price
-            print(f"🔎 Buscando {symbol} en STOCKS USA...")
-            # Backup Yahoo
             try: return yf.Ticker(symbol).fast_info.last_price or 0.0
             except: pass
 
-        # 3. TODO LO DEMÁS: ASUMIMOS CRYPTO (Prioridad CMC)
-        else:
-            # print(f"🔎 Buscando {symbol} en CRYPTO (CMC/Binance)...")
-            
-            # Opción A: CoinMarketCap (Tu preferida)
-            price = self._fetch_cmc_price(symbol)
-            if price > 0: return price
-            
-            # Opción B: Binance (Muy rápida para las comunes)
-            price = self._fetch_binance_price(symbol)
-            if price > 0: return price
-            
-            # Opción C: TradingView Crypto (Respaldo final para raras como HYPE)
-            price = self._fetch_tv_price_crypto(symbol)
-            if price > 0: return price
+        # 3. INTENTO CRYPTO (Primero verificamos si parece Crypto)
+        # Si NO es stock conocido, probamos Crypto primero
+        price_crypto = self._fetch_cmc_price(symbol)
+        if price_crypto > 0: return price_crypto
+        
+        price_binance = self._fetch_binance_price(symbol)
+        if price_binance > 0: return price_binance
 
-        print(f"❌ No se encontró precio para {symbol}")
+        # 4. FALLBACK FINAL: "EL SALVAVIDAS" (Para acciones como RCL, MO, etc.)
+        # Si falló todo lo anterior, le preguntamos a Yahoo Finance "a ver si es una acción"
+        print(f"⚠️ {symbol} no es Cripto conocida. Probando como Stock Genérico...")
+        try:
+            # Probamos directo el símbolo (ej: RCL, MO)
+            price_stock = yf.Ticker(symbol).fast_info.last_price
+            if price_stock and price_stock > 0:
+                print(f"   ✅ Yahoo Finance Fallback ({symbol}): ${price_stock}")
+                return price_stock
+        except: pass
+
+        print(f"❌ No se encontró precio para {symbol} en ninguna fuente.")
         return 0.0
 
-    # --- MÉTODO EN CASCADA (FIX PARA COMPRAS) ---
-    # def get_current_price(self, symbol: str) -> float:
-    #     """
-    #     Intenta obtener el precio de 3 fuentes en orden:
-    #     1. Yahoo Finance (Stocks/Cripto)
-    #     2. Binance (Cripto API Pública)
-    #     3. CoinMarketCap (Tu API Key - Último recurso)
-    #     """
-    #     # --- A. INTENTO YAHOO FINANCE ---
-    #     try:
-    #         ticker_str = symbol if symbol in WATCHLIST_STOCKS or symbol in WATCHLIST_MERVAL else f"{symbol}-USD"
-    #         ticker = yf.Ticker(ticker_str)
-    #         hist = ticker.history(period="1d")
-    #         if not hist.empty:
-    #             return hist['Close'].iloc[-1]
-    #         else:
-    #             price = ticker.fast_info.last_price
-    #             if price: return price 
-    #             else: 
-    #                 print("No price data in Yahoo finance.")
-
-    #     except Exception:
-    #         pass # Falló Yahoo, seguimos...
-
-    #     # --- B. INTENTO BINANCE (Solo Criptos) ---
-    #     if symbol not in WATCHLIST_STOCKS or symbol not in WATCHLIST_MERVAL:
-    #         try:
-    #             # Binance usa pares sin guion, ej: BTCUSDT
-    #             url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
-    #             r = requests.get(url, timeout=3)
-    #             if r.status_code == 200:
-    #                 data = r.json()
-    #                 price = float(data['price'])
-    #                 print(f"✅ Precio {symbol} obtenido de Binance: {price}")
-    #                 return price
-    #         except Exception:
-    #             pass # Falló Binance, seguimos...
-
-    #     # --- C. INTENTO COINMARKETCAP (Fuente de Verdad) ---
-    #     try:
-    #         url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-    #         params = {'symbol': symbol, 'convert': 'USD'}
-    #         r = requests.get(url, headers=self.cmc_headers, params=params, timeout=5)
-    #         if r.status_code == 200:
-    #             data = r.json()
-    #             price = data['data'][symbol]['quote']['USD']['price']
-    #             print(f"✅ Precio {symbol} obtenido de CoinMarketCap: {price}")
-    #             return price
-    #     except Exception as e:
-    #         print(f"❌ Fallaron todas las fuentes para {symbol}: {e}")
-        
-    #     return 0.0
 
     def _calculate_rsi(self, series: pd.Series, period: int = 14) -> float:
         if len(series) < period + 1: return 50.0
