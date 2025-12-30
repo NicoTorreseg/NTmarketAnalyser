@@ -461,16 +461,16 @@ class MarketAnalyzer:
 
     def get_current_price(self, symbol: str) -> float:
         """
-        Lógica de Prioridades INTELIGENTE V2:
-        1. MERVAL (Argentina)
-        2. STOCKS USA (Lista VIP)
-        3. CRYPTO (Intentamos fuentes cripto)
-        4. FALLBACK GENÉRICO (Si todo falla, probamos Yahoo Finance como Stock)
+        Lógica de Prioridades INTELIGENTE V3:
+        1. MERVAL (Argentina) -> Pesos / CCL
+        2. STOCKS USA (Lista VIP) -> Directo USD
+        3. CRYPTO -> CMC / Binance
+        4. FALLBACK "D" (Si es LOMAD, busca LOMA y convierte) <--- NUEVO
+        5. FALLBACK GENÉRICO (Yahoo)
         """
         symbol = symbol.upper()
         
         # --- Listas de Identificación ---
-        # (Mantén tu lista merval_tickers larga aquí como la tenías)
         merval_tickers = [
             "YPFD", "GGAL", "BMA", "PAMP", "TECO2", "TXAR", "ALUA", "CRES", "TGSU2", "TGNO4",
             "EDN", "TRAN", "CEPU", "SUPV", "BYMA", "VALO", "CVH", "LOMA", "MIRG", "BHIP",
@@ -485,7 +485,6 @@ class MarketAnalyzer:
         
         # 1. DETECCIÓN: ¿ES MERVAL?
         if symbol in all_merval or symbol.endswith(".BA"):
-            price_ars = 0.0
             price_ars = self._fetch_tv_price_stock(symbol, ["argentina"])
             
             if price_ars == 0:
@@ -508,19 +507,33 @@ class MarketAnalyzer:
             try: return yf.Ticker(symbol).fast_info.last_price or 0.0
             except: pass
 
-        # 3. INTENTO CRYPTO (Primero verificamos si parece Crypto)
-        # Si NO es stock conocido, probamos Crypto primero
+        # 3. INTENTO CRYPTO
         price_crypto = self._fetch_cmc_price(symbol)
         if price_crypto > 0: return price_crypto
         
         price_binance = self._fetch_binance_price(symbol)
         if price_binance > 0: return price_binance
 
-        # 4. FALLBACK FINAL: "EL SALVAVIDAS" (Para acciones como RCL, MO, etc.)
-        # Si falló todo lo anterior, le preguntamos a Yahoo Finance "a ver si es una acción"
-        print(f"⚠️ {symbol} no es Cripto conocida. Probando como Stock Genérico...")
+        # --- 4. FALLBACK ESPECIAL: SUFIJO "D" (ARGENTINA) ---
+        # Si falló todo y termina en D (ej: LOMAD), probamos sin la D (LOMA)
+        if symbol.endswith("D") and len(symbol) > 3:
+            clean_symbol = symbol[:-1] # Quitamos la D
+            print(f"🇦🇷 Detectado sufijo 'D'. Probando variante base: {clean_symbol}...")
+            
+            # Reintentamos buscar la versión limpia en Merval (Pesos)
+            # Esto llamará a la lógica del punto 1 recursivamente o manual
+            price_ars_fallback = self._fetch_tv_price_stock(clean_symbol, ["argentina"])
+            
+            if price_ars_fallback > 0:
+                ccl = self.get_dolar_ccl()
+                if ccl > 0:
+                    usd_price = price_ars_fallback / ccl
+                    print(f"   ✅ Precio reconstruido ({symbol}): ${price_ars_fallback} ARS / {ccl} = ${usd_price:.2f} USD")
+                    return usd_price
+
+        # 5. FALLBACK FINAL: YAHOO GENÉRICO
+        print(f"⚠️ {symbol} no encontrada. Probando último recurso Yahoo...")
         try:
-            # Probamos directo el símbolo (ej: RCL, MO)
             price_stock = yf.Ticker(symbol).fast_info.last_price
             if price_stock and price_stock > 0:
                 print(f"   ✅ Yahoo Finance Fallback ({symbol}): ${price_stock}")
@@ -529,7 +542,6 @@ class MarketAnalyzer:
 
         print(f"❌ No se encontró precio para {symbol} en ninguna fuente.")
         return 0.0
-
 
     def _calculate_rsi(self, series: pd.Series, period: int = 14) -> float:
         if len(series) < period + 1: return 50.0
