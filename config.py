@@ -131,3 +131,7 @@ STOP_LOSS_PCT = -2.5            # Vender si pierde -2.5%
 MIN_AI_SCORE = 60               # <--- CAMBIO AQUÍ (Antes 80)
 STRICT_BUY_DECISION = True      # Solo aceptar "BUY"
 
+# --- NUEVAS REGLAS DE SIZING DINÁMICO ---
+MAX_RISK_PER_TRADE_PCT = 0.10   # Máximo 10% del portafolio por trade (Alta convicción)
+MIN_RISK_PER_TRADE_PCT = 0.02   # Mínimo 2% del portafolio por trade (Especulativo)
+

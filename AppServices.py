@@ -17,7 +17,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 class NewsIntel:
     def __init__(self):
-        self.googlenews = GoogleNews(lang='en', period='1d') # Noticias de últimas 24h
+        self.googlenews = GoogleNews(lang='en', period='7d') # Más tiempo de búsqueda
         self.model = genai.GenerativeModel('gemini-2.5-flash')
 
         self.model_premium = genai.GenerativeModel('gemini-2.5-flash')
@@ -54,25 +54,53 @@ class NewsIntel:
             else:
                 search_term = f"{symbol} stock news"
 
-        print(f"🧠 [IA] Buscando ({'ES' if is_merval else 'EN'}): '{search_term}'...")
+        print(f"🧠 [IA] Buscando noticias para: '{search_term}'...")
         
-        # 2. EJECUCIÓN (Igual que antes)
-        self.googlenews.clear()
-        self.googlenews.search(search_term)
-        results = self.googlenews.result()
+        news_text = ""
         
-        # Reintento inteligente para Merval
-        if not results and is_merval:
-             print(f"   ⚠️ Reintentando con ticker: {symbol}...")
-             self.googlenews.search(f"{symbol} acciones merval")
-             results = self.googlenews.result()
+        # 2A. INTENTO YFINANCE (Mucho más fiable y rápido)
+        yf_symbol = symbol
+        if is_merval and not symbol.endswith(".BA"):
+            yf_symbol = f"{symbol}.BA"
+        elif is_crypto:
+            yf_symbol = f"{symbol}-USD"
+            
+        try:
+            ticker = yf.Ticker(yf_symbol)
+            if hasattr(ticker, 'news') and ticker.news:
+                for item in ticker.news[:5]:
+                    content = item.get('content', {})
+                    if content: # Estructura nueva
+                        title = content.get('title', '')
+                        media = content.get('provider', {}).get('displayName', 'News')
+                    else: # Estructura vieja
+                        title = item.get('title', '')
+                        media = 'News'
+                    news_text += f"- {title} (Source: {media})\n"
+                print(f"   ✅ Extraídas {len(ticker.news[:5])} noticias vía yfinance.")
+        except Exception as e:
+            print(f"   ⚠️ yfinance falló para {symbol}: {e}")
 
-        if not results:
-            return {"score": 50, "decision": "NEUTRAL", "reason": f"Sin noticias para {search_term}"}
+        # 2B. FALLBACK GOOGLE NEWS (Si yf falló o no dio resultados)
+        if not news_text:
+            print(f"   ⚠️ Buscando alternativo vía GoogleNews...")
+            self.googlenews.clear()
+            self.googlenews.search(search_term)
+            results = self.googlenews.result()
+            
+            if not results and is_merval:
+                 self.googlenews.search(f"{symbol} acciones argentina")
+                 results = self.googlenews.result()
 
-        # 3. PROMPT CONTEXTUALIZADO (Ajustamos el rol de la IA)
-        top_news = [f"- {item['title']} (Source: {item['media']})" for item in results[:5]]
-        news_text = "\n".join(top_news)
+            if results:
+                top_news = [f"- {item['title']} (Source: {item['media']})" for item in results[:5]]
+                news_text = "\n".join(top_news)
+                print(f"   ✅ Extraídas {len(top_news)} noticias vía GoogleNews.")
+
+        if not news_text:
+            return {"score": 50, "bounce_probability": 50, "decision": "NEUTRAL", "reason": f"Sin noticias."}
+
+        # 3. PROMPT CONTEXTUALIZADO
 
         if is_crypto:
             asset_type = "cryptocurrency"
@@ -96,14 +124,15 @@ class NewsIntel:
         Task: 
         1. Analyze sentiment considering local economic context (inflation, regulations).
         2. Filter out irrelevant news (e.g., if analyzing 'Dash' crypto, ignore 'DoorDash' stocks).
-        3. Identify FUD, Hype, or Fundamentals.
+        3. Identify FUD, Hype, or Fundamentals. Is this drop a temporary panic (buy the dip) or structural damage?
         4. Analyze the sentiment ONLY based on relevant news.
 
         Response format (JSON only):
         {{
             "score": (integer 0-100, 0=Panic, 50=Neutral/Irrelevant, 100=Greed),
+            "bounce_probability": (integer 0-100, probability that the asset will bounce back vs continue dropping),
             "decision": ("BUY", "WAIT", "NEUTRAL"),
-            "reason": "Brief explanation in Spanish. If news are irrelevant, state it."
+            "reason": "Brief explanation in Spanish explaining if it's a structural drop or market panic. If news are irrelevant, state it."
         }}
         """
 

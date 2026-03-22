@@ -8,7 +8,7 @@ from modelsTables import Trade
 from AppServices import MarketAnalyzer, NewsIntel, Notifier
 from config import (
     TRADE_AMOUNT_USD, TAKE_PROFIT_PCT, STOP_LOSS_PCT, 
-    MIN_AI_SCORE, MAX_OPEN_POSITIONS
+    MIN_AI_SCORE, MAX_OPEN_POSITIONS, MAX_RISK_PER_TRADE_PCT, MIN_RISK_PER_TRADE_PCT, PAPER_BALANCE_INITIAL
 )
 
 class TradingBot:
@@ -27,6 +27,19 @@ class TradingBot:
 
     def _count_open_positions(self) -> int:
         return self.db.query(Trade).filter(Trade.status == "OPEN").count()
+
+    def _calculate_position_size(self, ai_score: int, bounce_prob: int) -> float:
+        """Calcula el tamaño de la inversión basado en la convicción de la IA y el tamaño del portafolio."""
+        base_capital = PAPER_BALANCE_INITIAL
+        if bounce_prob >= 80 and ai_score >= 80:
+            risk_pct = MAX_RISK_PER_TRADE_PCT
+        elif bounce_prob >= 65 and ai_score >= 70:
+            risk_pct = (MAX_RISK_PER_TRADE_PCT + MIN_RISK_PER_TRADE_PCT) / 2
+        else:
+            risk_pct = MIN_RISK_PER_TRADE_PCT
+            
+        amount_usd = base_capital * risk_pct
+        return amount_usd
 
     # ==========================================================
     # 🛡️ EL GUARDIÁN: Revisa precios y vende si toca SL/TP
@@ -126,21 +139,26 @@ class TradingBot:
             decision = ai_analysis.get('decision', 'NEUTRAL')
             score = ai_analysis.get('score', 0)
             reason = ai_analysis.get('reason', 'Sin datos')
+            bounce_prob = ai_analysis.get('bounce_probability', 50)
 
-            print(f"      Resultado: {decision} (Score: {score})")
+            print(f"      Resultado: {decision} (Score: {score}, Bounce: {bounce_prob}%)")
 
             # Filtro 3: Gatillo de Compra
             if decision == "BUY" and score >= MIN_AI_SCORE:
+                investment_amount = self._calculate_position_size(score, bounce_prob)
+
                 # Guardamos SNAPSHOT para ML futuro
                 snapshot = {
                     "rsi": op.get('rsi'),
                     "pct_change": op.get('percent_change') or op.get('percent_change_24h'),
                     "ai_score": score,
+                    "bounce_prob": bounce_prob,
                     "market_type": market_type,
-                    "ai_reason_summary": reason[:50]
+                    "ai_reason_summary": reason[:50],
+                    "invested_usd": investment_amount
                 }
                 
-                self._execute_buy(symbol, op['price'], score, reason, snapshot)
+                self._execute_buy(symbol, op['price'], score, reason, snapshot, investment_amount)
                 
                 print("   ⏳ Enfriando motores tras compra (10s)...") # LOG NUEVO
                 time.sleep(10) # <--- INTERVALO DE SEGURIDAD NUEVO
@@ -153,14 +171,14 @@ class TradingBot:
             # Pausa normal entre análisis (si no compró)
             time.sleep(2)
 
-    def _execute_buy(self, symbol: str, price: float, score: int, reason: str, snapshot: dict):
-        quantity = TRADE_AMOUNT_USD / price
+    def _execute_buy(self, symbol: str, price: float, score: int, reason: str, snapshot: dict, investment_usd: float):
+        quantity = investment_usd / price
         
         new_trade = Trade(
             symbol=symbol,
             entry_price=price,
             quantity=quantity,
-            invested_amount=TRADE_AMOUNT_USD,
+            invested_amount=investment_usd,
             status="OPEN",
             bought_at=datetime.utcnow(),
             analysis_snapshot=json.dumps(snapshot) # <--- DATA PARA ML
@@ -172,8 +190,9 @@ class TradingBot:
             f"🔫 **BOT: COMPRA EJECUTADA**\n"
             f"Activo: {symbol}\n"
             f"Entrada: ${price:.2f}\n"
+            f"Inversión: ${investment_usd:.2f}\n"
             f"IA Score: {score}\n"
             f"Tesis: {reason}"
         )
         Notifier.send_telegram_alert(msg)
-        print(f"   ✅ Compra ejecutada: {symbol}")
+        print(f"   ✅ Compra ejecutada: {symbol} por ${investment_usd:.2f}")
