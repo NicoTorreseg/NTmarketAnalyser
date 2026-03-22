@@ -38,17 +38,22 @@ class NewsIntel:
         """
         Busca noticias con contexto dinámico de idioma y región.
         """
-        # 1. AJUSTE DE IDIOMA SEGÚN MERCADO 🔥
+        # 1. AJUSTE DE IDIOMA Y QUERIES SEGÚN MERCADO (Estandarización de CEDEARs) 🔥
+        # 2: ESTANDARIZACIÓN DE QUERIES PARA EL MERVAL (Resolución de CEDEARs)
+        is_cedear = False
         if is_merval:
-            # Si es Merval, forzamos Español y región Argentina
-            self.googlenews = GoogleNews(lang='es', region='AR')
-            # Limpiamos el nombre (a veces viene como "Grupo Financiero Galicia S.A.")
+            # Lista de acciones puramente argentinas (para saber si es CEDEAR o no)
+            locales_arg = ["YPF", "YPFD", "GGAL", "BMA", "BBAR", "SUPV", "PAMP", "CEPU", "TGSU2", "TGNO4", "EDN", "TECO2", "LOMA", "CRES", "IRSA", "TXAR", "ALUA"]
             clean_name = asset_name.split(' inc')[0].split(' S.A.')[0].split(' Corp')[0]
-            # Búsqueda más natural para diarios argentinos
-            search_term = f"{clean_name} acciones economía"
+            
+            if symbol.replace(".BA", "") not in locales_arg:
+                is_cedear = True
+                # Es CEDEAR: Forzamos la query como si fuera USA y en inglés
+                search_term = f"{symbol.replace('.BA', '')} stock news"
+                print(f"🎯 [CEDEAR Detectado] Reformateando query a origen: {search_term}")
+            else:
+                search_term = f"{clean_name} acciones economía"
         else:
-            # Para Crypto y Stocks USA, seguimos en Inglés
-            self.googlenews = GoogleNews(lang='en') 
             if is_crypto:
                 search_term = f"{asset_name} cryptocurrency" if asset_name else f"{symbol} crypto coin"
             else:
@@ -58,32 +63,8 @@ class NewsIntel:
         
         news_text = ""
         
-        # 2A. INTENTO YFINANCE (Mucho más fiable y rápido)
-        yf_symbol = symbol
-        if is_merval and not symbol.endswith(".BA"):
-            yf_symbol = f"{symbol}.BA"
-        elif is_crypto:
-            yf_symbol = f"{symbol}-USD"
-            
+        # 1A: INTENTO GOOGLE NEWS (Motor Primario)
         try:
-            ticker = yf.Ticker(yf_symbol)
-            if hasattr(ticker, 'news') and ticker.news:
-                for item in ticker.news[:5]:
-                    content = item.get('content', {})
-                    if content: # Estructura nueva
-                        title = content.get('title', '')
-                        media = content.get('provider', {}).get('displayName', 'News')
-                    else: # Estructura vieja
-                        title = item.get('title', '')
-                        media = 'News'
-                    news_text += f"- {title} (Source: {media})\n"
-                print(f"   ✅ Extraídas {len(ticker.news[:5])} noticias vía yfinance.")
-        except Exception as e:
-            print(f"   ⚠️ yfinance falló para {symbol}: {e}")
-
-        # 2B. FALLBACK GOOGLE NEWS (Si yf falló o no dio resultados)
-        if not news_text:
-            print(f"   ⚠️ Buscando alternativo vía GoogleNews...")
             self.googlenews.clear()
             self.googlenews.search(search_term)
             results = self.googlenews.result()
@@ -96,8 +77,37 @@ class NewsIntel:
                 top_news = [f"- {item['title']} (Source: {item['media']})" for item in results[:5]]
                 news_text = "\n".join(top_news)
                 print(f"   ✅ Extraídas {len(top_news)} noticias vía GoogleNews.")
-
+        except Exception as e:
+            pass # Pasa silenciosamente al fallback
+            
+        # 1B: INTENTO YFINANCE (Sistema de Respaldo)
         if not news_text:
+            yf_symbol = symbol
+            if is_merval and not symbol.endswith(".BA"):
+                yf_symbol = f"{symbol}.BA"
+            elif is_crypto:
+                yf_symbol = f"{symbol}-USD"
+                
+            try:
+                ticker = yf.Ticker(yf_symbol)
+                if hasattr(ticker, 'news') and ticker.news:
+                    for item in ticker.news[:5]:
+                        content = item.get('content', {})
+                        if content: # Estructura nueva
+                            title = content.get('title', '')
+                            media = content.get('provider', {}).get('displayName', 'News')
+                        else: # Estructura vieja
+                            title = item.get('title', '')
+                            media = 'News'
+                        news_text += f"- {title} (Source: {media})\n"
+                    if news_text:
+                        print(f"   ✅ Extraídas {len(ticker.news[:5])} noticias vía yfinance (Backup).")
+            except Exception as e:
+                pass
+
+        # Si ambas APIs fallan verdaderamente
+        if not news_text:
+            print(f"   ⚠️ Sin noticias oficiales en ninguna API. Evaluando únicamente por Técnicos.")
             return {"score": 50, "bounce_probability": 50, "decision": "NEUTRAL", "reason": f"Sin noticias."}
 
         # 3. PROMPT CONTEXTUALIZADO
@@ -113,6 +123,11 @@ class NewsIntel:
             asset_type = "stock"
             role = "Senior Financial Analyst Wall Street Expert"
         
+        # 3: MEJORA DEL PROMPT DE ANÁLISIS DE SENTIMIENTO (Prevención de Alucinaciones)
+        regla_cedear = ""
+        if is_cedear:
+            regla_cedear = "\nREGLA DE CONTEXTO: Si el activo analizado es un CEDEAR negociado en Argentina, evalúa EXCLUSIVAMENTE los fundamentales y noticias de la empresa en su mercado de origen (Global/USA). IGNORA por completo el contexto macroeconómico, inflacionario o regulatorio de Argentina, ya que no afecta el modelo de negocio subyacente de la empresa."
+
         prompt = f"""
         Role: {role}.
         Asset: {asset_name if asset_name else symbol} ({asset_type}).
@@ -122,7 +137,7 @@ class NewsIntel:
         {news_text}
 
         Task: 
-        1. Analyze sentiment considering local economic context (inflation, regulations).
+        1. Analyze sentiment considering local economic context (inflation, regulations).{regla_cedear}
         2. Filter out irrelevant news (e.g., if analyzing 'Dash' crypto, ignore 'DoorDash' stocks).
         3. Identify FUD, Hype, or Fundamentals. Is this drop a temporary panic (buy the dip) or structural damage?
         4. Analyze the sentiment ONLY based on relevant news.
@@ -815,9 +830,14 @@ class MarketAnalyzer:
             # Agregamos la etiqueta al mensaje técnico visualmente
             if market_type == 'CRYPTO':
                  rank = row.get('crypto_total_rank', 999)
+                 tier_crypto = "CRYPTO TOP 50" if rank <= 50 else "CRYPTO RISK"
                  tech_msg.append("🏆 TOP 50" if rank <= 50 else "⚡ GEM/RISK")
+                 tier_val = tier_crypto
             elif tier:
                  tech_msg.append(tier)
+                 tier_val = tier
+            else:
+                 tier_val = "UNKNOWN"
             
             if patron: tech_msg.append(f"🕯️ {patron}")
             if rsi < 30: tech_msg.append(f"💎 Oversold ({round(rsi)})")
@@ -834,6 +854,7 @@ class MarketAnalyzer:
                 "percent_change": float(row[col_change]),
                 "rsi": float(rsi) if pd.notna(rsi) else 50,
                 "technical_signal": signal_reason,
+                "tier": tier_val, # Exportamos el Tier para Position Sizing
                 "ai_score": None, "ai_decision": None, "ai_reason": None
             })
 

@@ -26,13 +26,20 @@ def run_debug_env():
         print("="*50)
         
         ops = analyzer.find_market_opportunities(market, threshold, tier1)
-        print(f"✅ Se encontraron {len(ops)} oportunidades técnicas en {market}.\n")
         
-        if not ops:
+        # Filtramos estrictamente por la nueva regla de RSI dinámica
+        valid_ops = []
+        for op in ops:
+            if bot._is_valid_technical(market, op.get('tier', ''), op.get('rsi'), op.get('percent_change') or op.get('percent_change_24h', 0)):
+                valid_ops.append(op)
+                
+        print(f"✅ Se validaron {len(valid_ops)} oportunidades estrictas (RSI+Drop) de {len(ops)} iniciales en {market}.\n")
+        
+        if not valid_ops:
             continue
             
-        # Vamos a probar solo los primeros 2 de cada mercado para no quemar la API de LLM rapido
-        for op in ops[:2]:
+        # Vamos a probar solo los primeros 2 de cada mercado para no quemar la API de LLM rápido
+        for op in valid_ops[:2]:
             symbol = op['symbol']
             name = op.get('name', symbol)
             price = op['price']
@@ -45,36 +52,6 @@ def run_debug_env():
             
             is_crypto = (market == 'CRYPTO')
             is_merval = (market == 'MERVAL')
-            
-            # --- DEBUG DE NOTICIAS ---
-            # Vamos a ver qué lee el bot realmente antes de pasarlo a la IA
-            if is_merval:
-                intel.googlenews.clear()
-                intel.googlenews.lang = 'es'
-                intel.googlenews.region = 'AR'
-                clean_name = name.split(' inc')[0].split(' S.A.')[0].split(' Corp')[0]
-                search_term = f"{clean_name} acciones economía"
-            else:
-                intel.googlenews.clear()
-                intel.googlenews.lang = 'en'
-                if is_crypto:
-                    search_term = f"{name} cryptocurrency" if name else f"{symbol} crypto coin"
-                else:
-                    search_term = f"{symbol} stock news"
-            
-            print(f"📰 BUSCANDO NOTICIAS: '{search_term}'...")
-            try:
-                intel.googlenews.search(search_term)
-                results = intel.googlenews.result()
-                if not results and is_merval:
-                     intel.googlenews.search(f"{symbol} acciones merval")
-                     results = intel.googlenews.result()
-                
-                print(f"📝 Se encontraron {len(results)} titulares. Los top 3 son:")
-                for res in results[:3]:
-                    print(f"   - {res['title']} ({res.get('media', 'Unkown')})")
-            except Exception as e:
-                print(f"❌ Error buscando noticias: {e}")
                 
             # --- DEBUG DE IA ---
             print("\n🤖 CONSULTANDO A LA INTELIGENCIA ARTIFICIAL...")
@@ -98,7 +75,8 @@ def run_debug_env():
                 
                 # --- DEBUG DE CAPITAL ---
                 if decision == "BUY":
-                    size = bot._calculate_position_size(score, bounce)
+                    tier = op.get('tier', 'UNKNOWN')
+                    size = bot._calculate_position_size(score, bounce, tier)
                     print(f"\n💰 CAPITAL A INVERTIR: ${size:.2f} USD")
                 else:
                     print("\n🛑 NO SE EJECUTA COMPRA (No alcanzó el threshold de BUY o Score).")

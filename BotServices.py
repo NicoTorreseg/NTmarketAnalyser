@@ -28,18 +28,54 @@ class TradingBot:
     def _count_open_positions(self) -> int:
         return self.db.query(Trade).filter(Trade.status == "OPEN").count()
 
-    def _calculate_position_size(self, ai_score: int, bounce_prob: int) -> float:
+    def _calculate_position_size(self, ai_score: int, bounce_prob: int, tier: str) -> float:
         """Calcula el tamaño de la inversión basado en la convicción de la IA y el tamaño del portafolio."""
         base_capital = PAPER_BALANCE_INITIAL
-        if bounce_prob >= 80 and ai_score >= 80:
-            risk_pct = MAX_RISK_PER_TRADE_PCT
-        elif bounce_prob >= 65 and ai_score >= 70:
-            risk_pct = (MAX_RISK_PER_TRADE_PCT + MIN_RISK_PER_TRADE_PCT) / 2
+        
+        # 5: IMPLEMENTACIÓN DE POSITION SIZING DINÁMICO (Gestión de Riesgo)
+        # Detectamos la calidad del activo para ajustar el riesgo:
+        tier_upper = str(tier).upper()
+        if "BLUE CHIP" in tier_upper or "TIER 1" in tier_upper:
+            tier_multiplier = 1.0  # Asignación base del 100% (ej. $1000)
+        elif "SPECULATIVE" in tier_upper or "TOP 50" in tier_upper or "TIER 2" in tier_upper:
+            tier_multiplier = 0.5  # Asignación defensiva del 50% (ej. $500)
         else:
-            risk_pct = MIN_RISK_PER_TRADE_PCT
+            tier_multiplier = 0.1  # Asignación especulativa del 10% (ej. $100)
+
+        if bounce_prob >= 80 and ai_score >= 80:
+            risk_pct = MAX_RISK_PER_TRADE_PCT * tier_multiplier
+        elif bounce_prob >= 65 and ai_score >= 70:
+            risk_pct = ((MAX_RISK_PER_TRADE_PCT + MIN_RISK_PER_TRADE_PCT) / 2) * tier_multiplier
+        else:
+            risk_pct = MIN_RISK_PER_TRADE_PCT * tier_multiplier
             
         amount_usd = base_capital * risk_pct
         return amount_usd
+
+    def _is_valid_technical(self, market_type: str, tier: str, current_rsi: float, pct_change: float) -> bool:
+        """Aplica distintos umbrales de sobreventa según el Tier del activo y mercado (Filtro Inteligente)"""
+        tier_str = str(tier).upper()
+        try:
+            rsi = float(current_rsi)
+        except (ValueError, TypeError):
+            rsi = 50.0
+            
+        try:
+            drop = float(pct_change)
+        except (ValueError, TypeError):
+            drop = 0.0
+
+        if market_type in ['USA', 'MERVAL']:
+            if "BLUE CHIP" in tier_str or "TIER 1" in tier_str:
+                return rsi < 40 and drop <= -1.5
+            else:
+                return rsi < 35 and drop <= -2.0
+        elif market_type == 'CRYPTO':
+            if "TOP 50" in tier_str or "TIER 1" in tier_str:
+                return rsi < 30 and drop <= -2.0
+            else: # Meme/Risk
+                return rsi < 25 and drop <= -3.0
+        return False
 
     # ==========================================================
     # 🛡️ EL GUARDIÁN: Revisa precios y vende si toca SL/TP
@@ -119,6 +155,15 @@ class TradingBot:
         for op in opportunities:
             symbol = op['symbol']
             
+            # 4: AJUSTE DE PARÁMETROS TÉCNICOS DINÁMICOS (Filtro de Ruido de Mercado)
+            current_rsi = op.get('rsi', 50)
+            pct_change = op.get('percent_change', 0)
+            tier_val = op.get('tier', 'UNKNOWN')
+            
+            if not self._is_valid_technical(market_type, tier_val, current_rsi, pct_change):
+                print(f"   ⏭️ {symbol} Descartado: RSI {round(current_rsi,2)} no cumple requisito para {tier_val}.")
+                continue
+
             # Filtro 1: ¿Ya la tengo?
             if self._is_asset_in_portfolio(symbol):
                 continue
@@ -145,7 +190,7 @@ class TradingBot:
 
             # Filtro 3: Gatillo de Compra
             if decision == "BUY" and score >= MIN_AI_SCORE:
-                investment_amount = self._calculate_position_size(score, bounce_prob)
+                investment_amount = self._calculate_position_size(score, bounce_prob, op.get('tier', ''))
 
                 # Guardamos SNAPSHOT para ML futuro
                 snapshot = {
